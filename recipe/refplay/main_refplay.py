@@ -136,7 +136,13 @@ class TaskRunner:
                 reward_manager_name = reward_manager_cfg.name
 
         reward_manager_name = reward_manager_name or "naive"
-        if reward_manager_name == "naive":
+        if reward_manager_name == "refplay_gsm8k_dense":
+            from .gsm8k_dense_reward import DenseGSM8KReward
+
+            reward_fn = DenseGSM8KReward(tokenizer=tokenizer, num_examine=0)
+            val_reward_fn = DenseGSM8KReward(tokenizer=tokenizer, num_examine=1)
+            reward_manager_cls = None
+        elif reward_manager_name == "naive":
             from verl.workers.reward_manager import NaiveRewardManager
 
             reward_manager_cls = NaiveRewardManager
@@ -155,23 +161,24 @@ class TaskRunner:
         else:
             raise NotImplementedError
 
-        compute_score = get_custom_reward_fn(config)
-        reward_kwargs = {}
-        if reward_model_cfg is not None:
-            reward_kwargs.update(dict(reward_model_cfg.get("reward_kwargs", {})))
-        reward_fn = reward_manager_cls(
-            tokenizer=tokenizer,
-            num_examine=0,
-            compute_score=compute_score,
-            reward_fn_key=config.data.reward_fn_key,
-            **reward_kwargs,
-        )
-        val_reward_fn = reward_manager_cls(
-            tokenizer=tokenizer,
-            num_examine=1,
-            compute_score=compute_score,
-            reward_fn_key=config.data.reward_fn_key,
-        )
+        if reward_manager_cls is not None:
+            compute_score = get_custom_reward_fn(config)
+            reward_kwargs = {}
+            if reward_model_cfg is not None:
+                reward_kwargs.update(dict(reward_model_cfg.get("reward_kwargs", {})))
+            reward_fn = reward_manager_cls(
+                tokenizer=tokenizer,
+                num_examine=0,
+                compute_score=compute_score,
+                reward_fn_key=config.data.reward_fn_key,
+                **reward_kwargs,
+            )
+            val_reward_fn = reward_manager_cls(
+                tokenizer=tokenizer,
+                num_examine=1,
+                compute_score=compute_score,
+                reward_fn_key=config.data.reward_fn_key,
+            )
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
         trainer = RayRefPlayTrainer(
