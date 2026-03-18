@@ -48,18 +48,7 @@ reference_rollout:
     log_prob_max_token_len_per_gpu: ${actor_rollout_ref.ref.log_prob_max_token_len_per_gpu}
     log_prob_use_dynamic_bsz: ${actor_rollout_ref.ref.log_prob_use_dynamic_bsz}
     fsdp_config: ${actor_rollout_ref.ref.fsdp_config}
-  rollout:
-    name: ${actor_rollout_ref.rollout.name}
-    mode: ${actor_rollout_ref.rollout.mode}
-    tensor_model_parallel_size: ${actor_rollout_ref.rollout.tensor_model_parallel_size}
-    gpu_memory_utilization: ${actor_rollout_ref.rollout.gpu_memory_utilization}
-    log_prob_micro_batch_size_per_gpu: ${actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu}
-    log_prob_max_token_len_per_gpu: ${actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu}
-    log_prob_use_dynamic_bsz: ${actor_rollout_ref.rollout.log_prob_use_dynamic_bsz}
-    temperature: ${actor_rollout_ref.rollout.temperature}
-    n: 1
-    val_kwargs:
-      n: 1
+  rollout: ${actor_rollout_ref.rollout}
 
 algorithm:
   adv_estimator: null
