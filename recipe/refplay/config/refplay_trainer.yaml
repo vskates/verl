@@ -1,0 +1,71 @@
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+actor_rollout_ref:
+  actor:
+    dpo_beta: 0.1
+    optim:
+      lr_warmup_steps: 15
+  rollout:
+    name: sglang
+    tensor_model_parallel_size: 1
+    gpu_memory_utilization: 0.4
+    n: 1
+    val_kwargs:
+      n: 1
+
+reference_rollout:
+  hybrid_engine: true
+  model:
+    path: ${actor_rollout_ref.model.path}
+    tokenizer_path: ${actor_rollout_ref.model.tokenizer_path}
+    trust_remote_code: ${actor_rollout_ref.model.trust_remote_code}
+    use_remove_padding: ${actor_rollout_ref.model.use_remove_padding}
+    enable_gradient_checkpointing: false
+    use_liger: ${actor_rollout_ref.model.use_liger}
+  actor:
+    optim:
+      lr: 0.0
+      lr_warmup_steps: 0
+      lr_warmup_steps_ratio: 0.0
+    checkpoint:
+      contents: ${actor_rollout_ref.actor.checkpoint.contents}
+    fsdp_config:
+      param_offload: false
+      optimizer_offload: false
+    ppo_micro_batch_size_per_gpu: ${actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu}
+    dpo_beta: ${actor_rollout_ref.actor.dpo_beta}
+  ref:
+    log_prob_micro_batch_size_per_gpu: ${actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu}
+    log_prob_max_token_len_per_gpu: ${actor_rollout_ref.ref.log_prob_max_token_len_per_gpu}
+    log_prob_use_dynamic_bsz: ${actor_rollout_ref.ref.log_prob_use_dynamic_bsz}
+    fsdp_config:
+      param_offload: ${actor_rollout_ref.ref.fsdp_config.param_offload}
+  rollout:
+    name: ${actor_rollout_ref.rollout.name}
+    mode: ${actor_rollout_ref.rollout.mode}
+    tensor_model_parallel_size: ${actor_rollout_ref.rollout.tensor_model_parallel_size}
+    gpu_memory_utilization: ${actor_rollout_ref.rollout.gpu_memory_utilization}
+    log_prob_micro_batch_size_per_gpu: ${actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu}
+    log_prob_max_token_len_per_gpu: ${actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu}
+    log_prob_use_dynamic_bsz: ${actor_rollout_ref.rollout.log_prob_use_dynamic_bsz}
+    temperature: ${actor_rollout_ref.rollout.temperature}
+    n: 1
+    val_kwargs:
+      n: 1
+
+algorithm:
+  adv_estimator: null
+  dpo_beta: 0.1
+  dpo_loss_type: sigmoid
+  dpo_label_smoothing: 0.0
+  use_kl_in_reward: false
+
+trainer:
+  log_val_generations: 0
+  ref_update_freq: -1
