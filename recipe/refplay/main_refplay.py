@@ -19,7 +19,10 @@ def main(config):
 
 
 def get_custom_reward_fn(config):
-    reward_fn_config = config.get("custom_reward_function") or {}
+    reward_fn_config = config.get("custom_reward_function")
+    if not reward_fn_config and config.get("reward") is not None:
+        reward_fn_config = config.reward.get("custom_reward_function")
+    reward_fn_config = reward_fn_config or {}
     file_path = reward_fn_config.get("path")
     if not file_path:
         return None
@@ -115,7 +118,24 @@ class TaskRunner:
             role_worker_mapping[Role.RewardModel] = ray.remote(RewardModelWorker)
             mapping[Role.RewardModel] = global_pool_id
 
-        reward_manager_name = config.reward_model.get("reward_manager", "naive")
+        reward_manager_name = None
+        reward_model_cfg = config.get("reward_model")
+        if reward_model_cfg is not None:
+            reward_manager_cfg = reward_model_cfg.get("reward_manager")
+            if isinstance(reward_manager_cfg, str):
+                reward_manager_name = reward_manager_cfg
+            elif reward_manager_cfg is not None and reward_manager_cfg.get("name") is not None:
+                reward_manager_name = reward_manager_cfg.name
+
+        reward_cfg = config.get("reward")
+        if reward_manager_name is None and reward_cfg is not None:
+            reward_manager_cfg = reward_cfg.get("reward_manager")
+            if isinstance(reward_manager_cfg, str):
+                reward_manager_name = reward_manager_cfg
+            elif reward_manager_cfg is not None and reward_manager_cfg.get("name") is not None:
+                reward_manager_name = reward_manager_cfg.name
+
+        reward_manager_name = reward_manager_name or "naive"
         if reward_manager_name == "naive":
             from verl.workers.reward_manager import NaiveRewardManager
 
@@ -136,7 +156,9 @@ class TaskRunner:
             raise NotImplementedError
 
         compute_score = get_custom_reward_fn(config)
-        reward_kwargs = dict(config.reward_model.get("reward_kwargs", {}))
+        reward_kwargs = {}
+        if reward_model_cfg is not None:
+            reward_kwargs.update(dict(reward_model_cfg.get("reward_kwargs", {})))
         reward_fn = reward_manager_cls(
             tokenizer=tokenizer,
             num_examine=0,
