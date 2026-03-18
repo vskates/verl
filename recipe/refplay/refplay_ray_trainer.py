@@ -194,21 +194,33 @@ class RayRefPlayTrainer(RaySPINTrainer):
                 gen_batch = batch.pop(batch_keys=batch_keys_to_pop, non_tensor_batch_keys=non_tensor_batch_keys_to_pop)
 
                 is_last_step = self.global_steps >= self.total_training_steps
+                debug_step = self.global_steps <= 2
+
+                def log_stage(stage: str):
+                    if debug_step:
+                        pprint(f"[refplay step {self.global_steps}] {stage}")
 
                 with _timer("step", timing_raw):
+                    log_stage("start")
                     with _timer("gen_actor", timing_raw):
+                        log_stage("gen_actor")
                         actor_gen = self.actor_rollout_wg.generate_sequences(gen_batch)
                     with _timer("gen_reference", timing_raw):
+                        log_stage("gen_reference")
                         opponent_gen = self.opponent_rollout_wg.generate_sequences(deepcopy(gen_batch))
 
+                    log_stage("build_actor_batch")
                     actor_batch = deepcopy(batch).union(actor_gen)
+                    log_stage("build_reference_batch")
                     opponent_batch = deepcopy(batch).union(opponent_gen)
                     actor_batch.batch["response_mask"] = compute_response_mask(actor_batch)
                     opponent_batch.batch["response_mask"] = compute_response_mask(opponent_batch)
 
                     with _timer("reward_actor", timing_raw):
+                        log_stage("reward_actor")
                         actor_batch, _ = self._score_batch(actor_batch)
                     with _timer("reward_reference", timing_raw):
+                        log_stage("reward_reference")
                         opponent_batch, _ = self._score_batch(opponent_batch)
 
                     actor_seq_rewards = actor_batch.batch["token_level_rewards"].sum(dim=-1)
@@ -218,25 +230,32 @@ class RayRefPlayTrainer(RaySPINTrainer):
                     metrics["game/actor_win_rate"] = (actor_seq_rewards >= opponent_seq_rewards).float().mean().item()
                     metrics["game/reward_margin_mean"] = (actor_seq_rewards - opponent_seq_rewards).mean().item()
 
+                    log_stage("build_pair_batch")
                     pair_batch = self._build_pair_batch(actor_batch, opponent_batch)
                     pair_batch.meta_info["global_token_num"] = torch.sum(pair_batch.batch["attention_mask"], dim=-1).tolist()
 
                     with _timer("policy_log_prob", timing_raw):
+                        log_stage("policy_log_prob")
                         old_log_prob = self.actor_rollout_wg.compute_log_prob(pair_batch)
                         pair_batch = pair_batch.union(old_log_prob)
 
                     with _timer("ref_log_prob", timing_raw):
+                        log_stage("ref_log_prob")
                         ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(pair_batch)
                         pair_batch = pair_batch.union(ref_log_prob)
 
                     with _timer("preference", timing_raw):
+                        log_stage("preference")
                         pair_batch = compute_onlineDPO_pref(pair_batch)
 
+                    log_stage("prepare_dpo_batch")
                     dpo_update_batch = self._prepare_dpo_batch(pair_batch)
 
                     with _timer("update_actor", timing_raw):
+                        log_stage("update_actor")
                         actor_output = self.actor_rollout_wg.update_actor_dpo(dpo_update_batch)
                     metrics.update(reduce_metrics(actor_output.meta_info["metrics"]))
+                    log_stage("step_complete")
 
                 if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
                     with _timer("testing", timing_raw):
