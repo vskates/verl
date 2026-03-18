@@ -33,21 +33,8 @@ reference_rollout:
     use_remove_padding: ${actor_rollout_ref.model.use_remove_padding}
     enable_gradient_checkpointing: false
     use_liger: ${actor_rollout_ref.model.use_liger}
-  actor:
-    optim:
-      lr: 0.0
-      lr_warmup_steps: 0
-      lr_warmup_steps_ratio: 0.0
-    checkpoint:
-      contents: ${actor_rollout_ref.actor.checkpoint.contents}
-    fsdp_config: ${actor_rollout_ref.actor.fsdp_config}
-    ppo_micro_batch_size_per_gpu: ${actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu}
-    dpo_beta: ${actor_rollout_ref.actor.dpo_beta}
-  ref:
-    log_prob_micro_batch_size_per_gpu: ${actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu}
-    log_prob_max_token_len_per_gpu: ${actor_rollout_ref.ref.log_prob_max_token_len_per_gpu}
-    log_prob_use_dynamic_bsz: ${actor_rollout_ref.ref.log_prob_use_dynamic_bsz}
-    fsdp_config: ${actor_rollout_ref.ref.fsdp_config}
+  actor: ${actor_rollout_ref.actor}
+  ref: ${actor_rollout_ref.ref}
   rollout: ${actor_rollout_ref.rollout}
 
 algorithm:
