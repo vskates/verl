@@ -191,7 +191,7 @@ class RayRefPlayTrainer(RaySPINTrainer):
             "report_path": report_path,
         }
 
-    def evaluate_against_reference(self, checkpoint_path: str, output_dir: str, preview_count: int = 5):
+    def evaluate_against_reference(self, checkpoint_path: str, output_dir: str, preview_count: int = 5, max_samples: int | None = None):
         if self.config.actor_rollout_ref.rollout.val_kwargs.n != 1:
             raise ValueError("RefPlay eval expects actor_rollout_ref.rollout.val_kwargs.n=1")
 
@@ -217,6 +217,9 @@ class RayRefPlayTrainer(RaySPINTrainer):
 
         example_index = 0
         for batch_idx, test_data in enumerate(self.val_dataloader):
+            if max_samples is not None and example_index >= max_samples:
+                break
+
             test_batch = DataProto.from_single_dict(test_data)
             prompt_texts = self._decode_rows(test_batch.batch["input_ids"])
             batch_data_sources = test_batch.non_tensor_batch.get("data_source", ["unknown"] * len(prompt_texts))
@@ -244,11 +247,22 @@ class RayRefPlayTrainer(RaySPINTrainer):
 
             actor_scores = actor_batch.batch["token_level_rewards"].sum(dim=-1).cpu().tolist()
             reference_scores = reference_batch.batch["token_level_rewards"].sum(dim=-1).cpu().tolist()
-            actor_scores_all.extend(actor_scores)
-            reference_scores_all.extend(reference_scores)
-
             actor_responses = self._decode_rows(actor_batch.batch["responses"])
             reference_responses = self._decode_rows(reference_batch.batch["responses"])
+
+            batch_limit = len(actor_scores)
+            if max_samples is not None:
+                batch_limit = min(batch_limit, max_samples - example_index)
+
+            actor_scores = actor_scores[:batch_limit]
+            reference_scores = reference_scores[:batch_limit]
+            prompt_texts = prompt_texts[:batch_limit]
+            batch_data_sources = batch_data_sources[:batch_limit]
+            actor_responses = actor_responses[:batch_limit]
+            reference_responses = reference_responses[:batch_limit]
+
+            actor_scores_all.extend(actor_scores)
+            reference_scores_all.extend(reference_scores)
 
             for key, values in actor_reward_extra.items():
                 if len(values) == len(actor_scores) and all(isinstance(v, (bool, int, float, np.bool_, np.integer, np.floating)) for v in values):
@@ -257,7 +271,7 @@ class RayRefPlayTrainer(RaySPINTrainer):
                 if len(values) == len(reference_scores) and all(isinstance(v, (bool, int, float, np.bool_, np.integer, np.floating)) for v in values):
                     numeric_reference_extras.setdefault(key, []).extend([float(v) for v in values])
 
-            for i in range(len(actor_scores)):
+            for i in range(batch_limit):
                 actor_score = float(actor_scores[i])
                 reference_score = float(reference_scores[i])
                 if actor_score > reference_score:
@@ -288,12 +302,15 @@ class RayRefPlayTrainer(RaySPINTrainer):
                 samples.append(sample)
                 example_index += 1
 
+            pprint(f"[refplay eval] processed {example_index} samples after batch {batch_idx}")
+
         actor_scores_np = np.asarray(actor_scores_all, dtype=np.float32)
         reference_scores_np = np.asarray(reference_scores_all, dtype=np.float32)
         summary = {
             "checkpoint_name": checkpoint_name,
             "checkpoint_path": checkpoint_root,
             "reference_model_path": self.config.reference_rollout.model.path,
+            "max_samples_requested": max_samples,
             "num_examples": int(actor_scores_np.shape[0]),
             "actor_reward_mean": float(actor_scores_np.mean()),
             "actor_reward_std": float(actor_scores_np.std()),

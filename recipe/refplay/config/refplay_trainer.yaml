@@ -61,6 +61,7 @@ evaluation:
   checkpoint_path: null
   output_dir: null
   val_batch_size: 32
+  max_samples: null
   preview_samples: 5
   do_sample: false
   n: 1

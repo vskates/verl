@@ -165,6 +165,7 @@ class EvalTaskRunner:
             checkpoint_path=evaluation_cfg.checkpoint_path,
             output_dir=output_dir,
             preview_count=evaluation_cfg.get("preview_samples", 5),
+            max_samples=evaluation_cfg.get("max_samples"),
         )
         pprint(summary)
 

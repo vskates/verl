@@ -46,4 +46,5 @@ CUDA_VISIBLE_DEVICES=${VISIBLE_DEVICES} python3 -m recipe.refplay.eval_refplay \
   evaluation.checkpoint_path=${CHECKPOINT_PATH} \
   evaluation.output_dir=${OUTPUT_DIR} \
   evaluation.val_batch_size=32 \
+  evaluation.max_samples=128 \
   evaluation.preview_samples=5 2>&1 | tee /tmp/refplay_eval.log
