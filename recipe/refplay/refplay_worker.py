@@ -25,6 +25,20 @@ logger.setLevel(os.getenv("VERL_PPO_LOGGING_LEVEL", "WARN"))
 
 
 class RefPlayActorRolloutRefWorker(ActorRolloutRefWorker):
+    def _get_rollout_fsdp_module(self):
+        if hasattr(self, "actor_module_fsdp"):
+            return self.actor_module_fsdp
+        if hasattr(self, "ref_module_fsdp"):
+            return self.ref_module_fsdp
+        return None
+
+    def _fsdp_module_on_cpu(self, module) -> bool:
+        try:
+            param = next(module.parameters())
+        except StopIteration:
+            return False
+        return param.device.type == "cpu"
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
         from .dp_actor import RefPlayDataParallelPPOActor
@@ -116,24 +130,46 @@ class RefPlayActorRolloutRefWorker(ActorRolloutRefWorker):
     def compute_ref_log_prob(self, data: DataProto):
         assert self._is_ref or self._is_rollout
 
-        data = data.to(torch.cuda.current_device())
-        data.meta_info["micro_batch_size"] = self.config.ref.log_prob_micro_batch_size_per_gpu
-        data.meta_info["temperature"] = self.config.rollout.temperature
-        data.meta_info["max_token_len"] = self.config.ref.log_prob_max_token_len_per_gpu
-        data.meta_info["use_dynamic_bsz"] = self.config.ref.log_prob_use_dynamic_bsz
+        ref_module = self._get_rollout_fsdp_module()
+        loaded_for_ref = ref_module is not None and self._fsdp_module_on_cpu(ref_module)
+        if loaded_for_ref:
+            load_fsdp_model_to_gpu(ref_module)
 
-        with self.ulysses_sharding_manager:
-            data = self.ulysses_sharding_manager.preprocess_data(data)
-            output = self.ref_policy.compute_log_prob(data=data)
-            output = DataProto.from_dict(tensors={"ref_log_prob": output})
-            output = self.ulysses_sharding_manager.postprocess_data(output)
+        try:
+            data = data.to(torch.cuda.current_device())
+            data.meta_info["micro_batch_size"] = self.config.ref.log_prob_micro_batch_size_per_gpu
+            data.meta_info["temperature"] = self.config.rollout.temperature
+            data.meta_info["max_token_len"] = self.config.ref.log_prob_max_token_len_per_gpu
+            data.meta_info["use_dynamic_bsz"] = self.config.ref.log_prob_use_dynamic_bsz
 
-        output = output.to("cpu")
+            with self.ulysses_sharding_manager:
+                data = self.ulysses_sharding_manager.preprocess_data(data)
+                output = self.ref_policy.compute_log_prob(data=data)
+                output = DataProto.from_dict(tensors={"ref_log_prob": output})
+                output = self.ulysses_sharding_manager.postprocess_data(output)
 
-        if self.world_size > 1:
-            self.ref_policy.actor_module._handle.reshard(True)
+            output = output.to("cpu")
 
-        return output
+            if self.world_size > 1:
+                self.ref_policy.actor_module._handle.reshard(True)
+
+            return output
+        finally:
+            if loaded_for_ref and (self._is_offload_param or not self._is_actor):
+                offload_fsdp_model_to_cpu(ref_module)
+
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def generate_sequences(self, prompts: DataProto):
+        rollout_module = self._get_rollout_fsdp_module()
+        loaded_for_rollout = rollout_module is not None and self._fsdp_module_on_cpu(rollout_module)
+        if loaded_for_rollout:
+            load_fsdp_model_to_gpu(rollout_module)
+
+        try:
+            return super().generate_sequences(prompts)
+        finally:
+            if loaded_for_rollout and (self._is_offload_param or not self._is_actor):
+                offload_fsdp_model_to_cpu(rollout_module)
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def update_actor_dpo(self, data: DataProto):
