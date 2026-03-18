@@ -52,7 +52,7 @@ CUDA_VISIBLE_DEVICES=${VISIBLE_DEVICES} python3 -m recipe.refplay.main_refplay \
   trainer.test_freq=-1 \
   +trainer.log_freq=1 \
   trainer.total_epochs=1 \
-  trainer.total_training_steps=${TOTAL_STEPS} 2>&1 | tee "${LOG_PATH}"
+  trainer.total_training_steps=${TOTAL_STEPS} >> "${LOG_PATH}" 2>&1
 
 CUDA_VISIBLE_DEVICES=${VISIBLE_DEVICES} python3 -m recipe.refplay.eval_refplay \
   data.train_files=$HOME/data/gsm8k/train.parquet \
@@ -92,4 +92,4 @@ CUDA_VISIBLE_DEVICES=${VISIBLE_DEVICES} python3 -m recipe.refplay.eval_refplay \
   evaluation.output_dir=${EVAL_DIR} \
   evaluation.val_batch_size=32 \
   evaluation.max_samples=null \
-  evaluation.preview_samples=5 2>&1 | tee -a "${LOG_PATH}"
+  evaluation.preview_samples=5 >> "${LOG_PATH}" 2>&1
