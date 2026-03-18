@@ -19,7 +19,16 @@ __all__ = ["DataParallelPPOActor"]
 
 
 class RefPlayDataParallelPPOActor(DataParallelPPOActor):
-    def compute_log_prob(self, data: DataProto) -> torch.Tensor:
+    def compute_log_prob(
+        self,
+        data: DataProto,
+        calculate_entropy: bool = False,
+        calculate_sum_pi_squared: bool = False,
+        **_: dict,
+    ) -> torch.Tensor:
+        if calculate_entropy or calculate_sum_pi_squared:
+            raise NotImplementedError("RefPlayDataParallelPPOActor only supports plain log-prob computation in this MVP.")
+
         self.actor_module.eval()
 
         micro_batch_size = data.meta_info["micro_batch_size"]
