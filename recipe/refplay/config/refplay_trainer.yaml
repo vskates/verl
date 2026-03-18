@@ -40,17 +40,14 @@ reference_rollout:
       lr_warmup_steps_ratio: 0.0
     checkpoint:
       contents: ${actor_rollout_ref.actor.checkpoint.contents}
-    fsdp_config:
-      param_offload: false
-      optimizer_offload: false
+    fsdp_config: ${actor_rollout_ref.actor.fsdp_config}
     ppo_micro_batch_size_per_gpu: ${actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu}
     dpo_beta: ${actor_rollout_ref.actor.dpo_beta}
   ref:
     log_prob_micro_batch_size_per_gpu: ${actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu}
     log_prob_max_token_len_per_gpu: ${actor_rollout_ref.ref.log_prob_max_token_len_per_gpu}
     log_prob_use_dynamic_bsz: ${actor_rollout_ref.ref.log_prob_use_dynamic_bsz}
-    fsdp_config:
-      param_offload: ${actor_rollout_ref.ref.fsdp_config.param_offload}
+    fsdp_config: ${actor_rollout_ref.ref.fsdp_config}
   rollout:
     name: ${actor_rollout_ref.rollout.name}
     mode: ${actor_rollout_ref.rollout.mode}
