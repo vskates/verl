@@ -21,6 +21,9 @@ actor_rollout_ref:
     val_kwargs:
       n: 1
 
+data:
+  seed: 42
+
 reference_rollout:
   hybrid_engine: true
   model:
