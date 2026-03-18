@@ -42,7 +42,12 @@ class RefPlayActorRolloutRefWorker(ActorRolloutRefWorker):
                 fsdp_config = self.config.actor.fsdp_config
             else:
                 optim_config = None
-                fsdp_config = OmegaConf.create()
+                # HF rollout still uses the local FSDP model for generation, so a
+                # pure rollout worker needs the same sharding policy as the actor.
+                if self.config.rollout.name == "hf":
+                    fsdp_config = self.config.actor.fsdp_config
+                else:
+                    fsdp_config = OmegaConf.create()
             self.actor_module_fsdp, self.actor_optimizer, self.actor_lr_scheduler, self.actor_model_config = self._build_model_optimizer(
                 model_path=self.config.model.path,
                 fsdp_config=fsdp_config,
@@ -73,6 +78,13 @@ class RefPlayActorRolloutRefWorker(ActorRolloutRefWorker):
 
         if self._is_rollout:
             self.rollout, self.rollout_sharding_manager = self._build_rollout(trust_remote_code=self.config.model.get("trust_remote_code", False))
+            # Reuse the frozen rollout-side model for ref log-probs to avoid
+            # keeping a third model copy resident just for DPO reference scores.
+            if not self._is_ref:
+                OmegaConf.set_struct(self.config.ref, True)
+                with open_dict(self.config.ref):
+                    self.config.ref.use_remove_padding = use_remove_padding
+                self.ref_policy = RefPlayDataParallelPPOActor(config=self.config.ref, actor_module=self.actor_module_fsdp)
 
         if self._is_ref:
             self.ref_module_fsdp = self._build_model_optimizer(
@@ -99,6 +111,29 @@ class RefPlayActorRolloutRefWorker(ActorRolloutRefWorker):
                 processing_class=self.processor if self.processor is not None else self.tokenizer,
                 checkpoint_contents=self.config.actor.checkpoint.contents,
             )
+
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def compute_ref_log_prob(self, data: DataProto):
+        assert self._is_ref or self._is_rollout
+
+        data = data.to(torch.cuda.current_device())
+        data.meta_info["micro_batch_size"] = self.config.ref.log_prob_micro_batch_size_per_gpu
+        data.meta_info["temperature"] = self.config.rollout.temperature
+        data.meta_info["max_token_len"] = self.config.ref.log_prob_max_token_len_per_gpu
+        data.meta_info["use_dynamic_bsz"] = self.config.ref.log_prob_use_dynamic_bsz
+
+        with self.ulysses_sharding_manager:
+            data = self.ulysses_sharding_manager.preprocess_data(data)
+            output = self.ref_policy.compute_log_prob(data=data)
+            output = DataProto.from_dict(tensors={"ref_log_prob": output})
+            output = self.ulysses_sharding_manager.postprocess_data(output)
+
+        output = output.to("cpu")
+
+        if self.world_size > 1:
+            self.ref_policy.actor_module._handle.reshard(True)
+
+        return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def update_actor_dpo(self, data: DataProto):

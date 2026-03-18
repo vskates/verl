@@ -24,7 +24,9 @@ class RayRefPlayTrainer(RaySPINTrainer):
         super().__init__(*args, **kwargs)
         self.use_opponent_rollout = Role.Rollout in self.role_worker_mapping
         assert self.use_opponent_rollout, "Frozen opponent rollout is required"
-        assert self.use_reference_policy, "Frozen reference policy is required for DPO log-probs"
+        # RefPlay reuses the frozen opponent worker for both generation and
+        # reference log-probs to keep memory use bounded on a single GPU.
+        self.use_reference_policy = True
 
     def init_workers(self):
         self.resource_pool_manager.create_resource_pool()
@@ -37,10 +39,6 @@ class RayRefPlayTrainer(RaySPINTrainer):
         opponent_pool = self.resource_pool_manager.get_resource_pool(Role.Rollout)
         opponent_rollout_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Rollout], config=self.config.reference_rollout, role="rollout")
         self.resource_pool_to_cls[opponent_pool]["opponent_rollout"] = opponent_rollout_cls
-
-        ref_pool = self.resource_pool_manager.get_resource_pool(Role.RefPolicy)
-        ref_policy_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.RefPolicy], config=self.config.reference_rollout, role="ref")
-        self.resource_pool_to_cls[ref_pool]["ref"] = ref_policy_cls
 
         if self.use_rm:
             rm_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel)
@@ -60,15 +58,13 @@ class RayRefPlayTrainer(RaySPINTrainer):
             all_wg.update(spawn_wg)
             self.wg_dicts.append(wg_dict)
 
-        self.ref_policy_wg = all_wg["ref"]
-        self.ref_policy_wg.init_model()
-
         if self.use_rm:
             self.rm_wg = all_wg["rm"]
             self.rm_wg.init_model()
 
         self.opponent_rollout_wg = all_wg["opponent_rollout"]
         self.opponent_rollout_wg.init_model()
+        self.ref_policy_wg = self.opponent_rollout_wg
 
         self.actor_rollout_wg = all_wg["actor_rollout"]
         self.actor_rollout_wg.init_model()

@@ -60,6 +60,8 @@ def run_refplay(config) -> None:
                     "TOKENIZERS_PARALLELISM": "true",
                     "NCCL_DEBUG": "WARN",
                     "VLLM_LOGGING_LEVEL": "WARN",
+                    "CUDA_DEVICE_ORDER": os.environ.get("CUDA_DEVICE_ORDER", "PCI_BUS_ID"),
+                    "PYTORCH_CUDA_ALLOC_CONF": os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True"),
                 }
             }
         }
@@ -97,7 +99,6 @@ class TaskRunner:
         role_worker_mapping = {
             Role.ActorRollout: ray.remote(RefPlayActorRolloutRefWorker),
             Role.Rollout: ray.remote(RefPlayActorRolloutRefWorker),
-            Role.RefPolicy: ray.remote(RefPlayActorRolloutRefWorker),
         }
 
         global_pool_id = "global_pool"
@@ -105,7 +106,6 @@ class TaskRunner:
         mapping = {
             Role.ActorRollout: global_pool_id,
             Role.Rollout: global_pool_id,
-            Role.RefPolicy: global_pool_id,
         }
 
         if config.reward_model.enable:
