@@ -5,6 +5,7 @@
 
 from copy import deepcopy
 from pprint import pprint
+import traceback
 
 import numpy as np
 import torch
@@ -15,7 +16,6 @@ from recipe.spin.spin_trainer import ResourcePoolManager, Role, RaySPINTrainer, 
 from verl import DataProto
 from verl.single_controller.ray import RayClassWithInitArgs
 from verl.single_controller.ray.base import create_colocated_worker_cls
-from verl.trainer.ppo.reward import compute_reward
 from verl.utils.tracking import Tracking
 
 
@@ -79,10 +79,23 @@ class RayRefPlayTrainer(RaySPINTrainer):
             rm_scores = self.rm_wg.compute_rm_score(batch)
             batch = batch.union(rm_scores)
 
-        reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
+        try:
+            if self.reward_fn is None:
+                reward_tensor = batch.batch.get("rm_scores", torch.zeros_like(batch.batch["response_mask"], dtype=torch.float32))
+            else:
+                reward_result = self.reward_fn(batch, return_dict=True)
+                reward_tensor = reward_result["reward_tensor"]
+                reward_extra_infos_dict = reward_result.get("reward_extra_info", {})
+        except Exception:
+            traceback.print_exc()
+            reward_tensor = torch.zeros_like(batch.batch["response_mask"], dtype=torch.float32)
+            reward_extra_infos_dict = {}
+
         batch.batch["token_level_scores"] = reward_tensor
         batch.batch["token_level_rewards"] = reward_tensor
         batch.batch["seq_level_rewards"] = reward_tensor.sum(dim=-1)
+        if reward_extra_infos_dict:
+            batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
         return batch, reward_extra_infos_dict
 
     def _build_pair_batch(self, actor_batch: DataProto, opponent_batch: DataProto):
@@ -249,4 +262,3 @@ class RayRefPlayTrainer(RaySPINTrainer):
 
                 progress_bar.update(1)
                 self.global_steps += 1
-
