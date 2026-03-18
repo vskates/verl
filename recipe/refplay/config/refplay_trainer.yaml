@@ -13,6 +13,8 @@ actor_rollout_ref:
       contents: ${.load_contents}
     optim:
       lr_warmup_steps: 15
+      # This verl build still reads the deprecated field in fsdp_workers.
+      warmup_style: constant
   rollout:
     name: vllm
     tensor_model_parallel_size: 1
