@@ -1,0 +1,166 @@
+\documentclass[11pt]{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{xcolor}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  urlcolor=blue,
+  pdftitle={RefPlay Architecture Notes},
+  pdfauthor={OpenAI Codex}
+}
+
+\title{RefPlay: Architecture and Training Objective}
+\author{}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Overview}
+
+RefPlay is an online preference-learning pipeline for math problems.
+For each prompt $x$, two models produce answers:
+\begin{itemize}
+  \item the \textbf{actor} $\pi_{\theta}$, which is trainable;
+  \item the \textbf{reference} $\pi_{\mathrm{ref}}$, which is frozen.
+\end{itemize}
+
+The actor and the reference answer the same prompt, both answers are scored,
+and the actor is updated from the resulting chosen/rejected pair.
+
+\section{Architecture}
+
+The pipeline has three main stages.
+
+\subsection*{1. Generation}
+
+Given a prompt $x$:
+\begin{align*}
+y_{\mathrm{actor}} &\sim \pi_{\theta}(\cdot \mid x), \\
+y_{\mathrm{ref}} &\sim \pi_{\mathrm{ref}}(\cdot \mid x).
+\end{align*}
+
+The current implementation uses:
+\begin{itemize}
+  \item \textbf{actor initialization:} \texttt{Qwen/Qwen2.5-Math-1.5B-Instruct},
+  \item \textbf{reference initialization:} \texttt{Qwen/Qwen2.5-Math-1.5B-Instruct}.
+\end{itemize}
+
+The actor is optimized during training; the reference is never updated.
+
+\subsection*{2. Rewarding}
+
+Each response is scored independently:
+\begin{align*}
+s_{\mathrm{actor}} &= r(x, y_{\mathrm{actor}}), \\
+s_{\mathrm{ref}} &= r(x, y_{\mathrm{ref}}).
+\end{align*}
+
+The current reward is a dense GSM8K-oriented reward:
+\begin{itemize}
+  \item full reward for a mathematically correct final answer when exact verification is available;
+  \item bonus for producing a parseable final answer;
+  \item bonus for using the expected \texttt{\#\#\#\#} final-answer format;
+  \item small bonus for concise outputs;
+  \item penalty for strong repetition.
+\end{itemize}
+
+This reward is denser than a pure binary correct/incorrect score, which makes
+early training less sparse.
+
+\subsection*{3. Preference Construction and Update}
+
+The higher-scoring response becomes \texttt{chosen} and the other becomes
+\texttt{rejected}. This creates an online preference pair:
+\begin{align*}
+y^{+} &= \arg\max \{ s_{\mathrm{actor}}, s_{\mathrm{ref}} \}, \\
+y^{-} &= \arg\min \{ s_{\mathrm{actor}}, s_{\mathrm{ref}} \}.
+\end{align*}
+
+Then the actor computes policy log-probabilities for both responses, while the
+frozen reference computes reference log-probabilities for both responses.
+
+\section{Loss}
+
+RefPlay uses a DPO-style objective. Let
+\begin{align*}
+\log \pi_{\theta}(y^{+} \mid x), \quad
+\log \pi_{\theta}(y^{-} \mid x), \\
+\log \pi_{\mathrm{ref}}(y^{+} \mid x), \quad
+\log \pi_{\mathrm{ref}}(y^{-} \mid x)
+\end{align*}
+be sequence-level log-probabilities on the chosen and rejected responses.
+
+The key logit is
+\[
+\Delta =
+\bigl(\log \pi_{\theta}(y^{+}\mid x) - \log \pi_{\theta}(y^{-}\mid x)\bigr)
+-
+\bigl(\log \pi_{\mathrm{ref}}(y^{+}\mid x) - \log \pi_{\mathrm{ref}}(y^{-}\mid x)\bigr).
+\]
+
+The training loss is a sigmoid-style DPO loss:
+\[
+\mathcal{L}_{\mathrm{DPO}}
+=
+- \log \sigma(\beta \Delta),
+\]
+where $\beta > 0$ controls how strongly the actor is pushed to prefer the
+chosen answer over the rejected one relative to the frozen reference.
+
+\section{Interpretation}
+
+This means the actor is trained to satisfy two goals at once:
+\begin{itemize}
+  \item beat the frozen reference on the task reward;
+  \item increase the relative likelihood of the better answer over the worse one.
+\end{itemize}
+
+So the pipeline is best understood as:
+\begin{quote}
+online pairwise preference optimization with a frozen reference opponent.
+\end{quote}
+
+\section{Current Data Setting}
+
+The current training and evaluation setup uses GSM8K-style math data:
+\begin{itemize}
+  \item data source: \texttt{openai/gsm8k},
+  \item task type: math word problems,
+  \item supervision target: final numeric answer,
+  \item expected response pattern: reasoning followed by \texttt{\#\#\#\# answer}.
+\end{itemize}
+
+\section{What Is Frozen and What Is Updated}
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Component & Role & Updated? \\
+\midrule
+Actor & Generates answers and is optimized & Yes \\
+Reference & Generates comparison answers and reference log-probs & No \\
+Reward & Scores both answers & No gradients to model policy \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Summary}
+
+In short, RefPlay works as follows:
+\begin{enumerate}
+  \item sample a prompt;
+  \item generate one answer from the actor and one from the frozen reference;
+  \item score both answers with the reward function;
+  \item form a chosen/rejected pair;
+  \item update only the actor with a DPO-style loss against the frozen reference.
+\end{enumerate}
+
+\end{document}
