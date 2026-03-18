@@ -221,8 +221,9 @@ class RayRefPlayTrainer(RaySPINTrainer):
             prompt_texts = self._decode_rows(test_batch.batch["input_ids"])
             batch_data_sources = test_batch.non_tensor_batch.get("data_source", ["unknown"] * len(prompt_texts))
 
-            eval_batch = deepcopy(test_batch)
-            test_gen_batch = self._build_eval_gen_batch(eval_batch)
+            actor_base_batch = deepcopy(test_batch)
+            test_gen_batch = self._build_eval_gen_batch(actor_base_batch)
+            reference_base_batch = deepcopy(actor_base_batch)
 
             actor_gen_batch_padded, actor_pad_size = pad_dataproto_to_divisor(test_gen_batch, self.actor_rollout_wg.world_size)
             actor_output_padded = self.actor_rollout_wg.generate_sequences(actor_gen_batch_padded)
@@ -233,8 +234,8 @@ class RayRefPlayTrainer(RaySPINTrainer):
             reference_output_padded = self.opponent_rollout_wg.generate_sequences(reference_gen_batch_padded)
             reference_output = unpad_dataproto(reference_output_padded, pad_size=reference_pad_size)
 
-            actor_batch = deepcopy(test_batch).union(deepcopy(actor_output))
-            reference_batch = deepcopy(test_batch).union(deepcopy(reference_output))
+            actor_batch = deepcopy(actor_base_batch).union(deepcopy(actor_output))
+            reference_batch = deepcopy(reference_base_batch).union(deepcopy(reference_output))
             actor_batch.batch["response_mask"] = compute_response_mask(actor_batch)
             reference_batch.batch["response_mask"] = compute_response_mask(reference_batch)
 
