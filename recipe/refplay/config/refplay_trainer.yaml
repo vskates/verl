@@ -14,7 +14,7 @@ actor_rollout_ref:
     optim:
       lr_warmup_steps: 15
   rollout:
-    name: sglang
+    name: vllm
     tensor_model_parallel_size: 1
     gpu_memory_utilization: 0.4
     n: 1
