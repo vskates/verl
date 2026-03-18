@@ -26,9 +26,6 @@ class RefPlayDataParallelPPOActor(DataParallelPPOActor):
         calculate_sum_pi_squared: bool = False,
         **_: dict,
     ) -> torch.Tensor:
-        if calculate_entropy or calculate_sum_pi_squared:
-            raise NotImplementedError("RefPlayDataParallelPPOActor only supports plain log-prob computation in this MVP.")
-
         self.actor_module.eval()
 
         micro_batch_size = data.meta_info["micro_batch_size"]
@@ -64,7 +61,15 @@ class RefPlayDataParallelPPOActor(DataParallelPPOActor):
             revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)
             log_probs = log_probs[revert_indices]
 
-        return log_probs
+        if not calculate_entropy and not calculate_sum_pi_squared:
+            return log_probs
+
+        extra_outputs = [log_probs]
+        if calculate_entropy:
+            extra_outputs.append(torch.zeros_like(log_probs))
+        if calculate_sum_pi_squared:
+            extra_outputs.append(torch.zeros_like(log_probs))
+        return tuple(extra_outputs)
 
     def update_policy_dpo_with_ref(self, data: DataProto):
         self.actor_module.train()
