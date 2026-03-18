@@ -6,6 +6,8 @@ export HYDRA_FULL_ERROR=1
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
+# HF rollout calls summon_full_params() during generation; param offload
+# leaves the flat param on CPU and trips FSDP's compute-device assertion.
 CUDA_VISIBLE_DEVICES=${VISIBLE_DEVICES} python3 -m recipe.refplay.main_refplay \
   data.train_files=$HOME/data/gsm8k/train.parquet \
   data.val_files=$HOME/data/gsm8k/test.parquet \
@@ -17,8 +19,6 @@ CUDA_VISIBLE_DEVICES=${VISIBLE_DEVICES} python3 -m recipe.refplay.main_refplay \
   actor_rollout_ref.actor.optim.lr=1e-6 \
   actor_rollout_ref.actor.ppo_mini_batch_size=8 \
   actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
-  # HF rollout calls summon_full_params() during generation; param offload
-  # leaves the flat param on CPU and trips FSDP's compute-device assertion.
   actor_rollout_ref.actor.fsdp_config.param_offload=False \
   actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
   actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
