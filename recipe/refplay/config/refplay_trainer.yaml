@@ -1,6 +1,6 @@
 hydra:
   searchpath:
-    - pkg://verl.trainer.config
+    - file://${oc.env:PWD}/verl/trainer/config
 
 defaults:
   - ppo_trainer
