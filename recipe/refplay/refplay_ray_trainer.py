@@ -201,8 +201,8 @@ class RayRefPlayTrainer(RaySPINTrainer):
                     with _timer("gen_reference", timing_raw):
                         opponent_gen = self.opponent_rollout_wg.generate_sequences(deepcopy(gen_batch))
 
-                    actor_batch = batch.union(actor_gen)
-                    opponent_batch = batch.union(opponent_gen)
+                    actor_batch = deepcopy(batch).union(actor_gen)
+                    opponent_batch = deepcopy(batch).union(opponent_gen)
                     actor_batch.batch["response_mask"] = compute_response_mask(actor_batch)
                     opponent_batch.batch["response_mask"] = compute_response_mask(opponent_batch)
 
