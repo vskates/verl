@@ -9,7 +9,7 @@ defaults:
 actor_rollout_ref:
   actor:
     dpo_beta: 0.1
-    grad_norm_threshold: null
+    grad_norm_threshold: 1.0e9
     checkpoint:
       contents: ${.load_contents}
     optim:
