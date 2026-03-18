@@ -9,6 +9,8 @@ defaults:
 actor_rollout_ref:
   actor:
     dpo_beta: 0.1
+    checkpoint:
+      contents: ${.load_contents}
     optim:
       lr_warmup_steps: 15
   rollout:
