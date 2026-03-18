@@ -16,7 +16,9 @@ actor_rollout_ref:
       # This verl build still reads the deprecated field in fsdp_workers.
       warmup_style: constant
   rollout:
-    name: vllm
+    # Use HF rollout for refplay by default. In this build, the FSDP<->vLLM
+    # bridge hits sleep/wake and memory-sync issues before training starts.
+    name: hf
     tensor_model_parallel_size: 1
     gpu_memory_utilization: 0.4
     n: 1
