@@ -233,8 +233,8 @@ class RayRefPlayTrainer(RaySPINTrainer):
             reference_output_padded = self.opponent_rollout_wg.generate_sequences(reference_gen_batch_padded)
             reference_output = unpad_dataproto(reference_output_padded, pad_size=reference_pad_size)
 
-            actor_batch = deepcopy(test_batch).union(actor_output)
-            reference_batch = deepcopy(test_batch).union(reference_output)
+            actor_batch = deepcopy(test_batch).union(deepcopy(actor_output))
+            reference_batch = deepcopy(test_batch).union(deepcopy(reference_output))
             actor_batch.batch["response_mask"] = compute_response_mask(actor_batch)
             reference_batch.batch["response_mask"] = compute_response_mask(reference_batch)
 
