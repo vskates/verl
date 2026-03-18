@@ -51,10 +51,19 @@ def get_custom_reward_fn(config):
 def run_refplay(config) -> None:
     os.environ["ENSURE_CUDA_VISIBLE_DEVICES"] = os.environ.get("CUDA_VISIBLE_DEVICES", "")
     if not ray.is_initialized():
-        ray.init(
-            runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_LOGGING_LEVEL": "WARN"}},
-            num_cpus=config.ray_init.num_cpus,
-        )
+        ray_init_kwargs = {
+            "runtime_env": {
+                "env_vars": {
+                    "TOKENIZERS_PARALLELISM": "true",
+                    "NCCL_DEBUG": "WARN",
+                    "VLLM_LOGGING_LEVEL": "WARN",
+                }
+            }
+        }
+        ray_init_cfg = config.get("ray_init")
+        if ray_init_cfg is not None and ray_init_cfg.get("num_cpus") is not None:
+            ray_init_kwargs["num_cpus"] = ray_init_cfg.num_cpus
+        ray.init(**ray_init_kwargs)
 
     runner = TaskRunner.remote()
     ray.get(runner.run.remote(config))
