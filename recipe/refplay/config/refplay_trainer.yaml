@@ -47,5 +47,9 @@ algorithm:
   use_kl_in_reward: false
 
 trainer:
+  project_name: verl_refplay
+  experiment_name: gsm8k_refplay
+  default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
   log_val_generations: 0
   ref_update_freq: -1
+  resume_mode: disable
