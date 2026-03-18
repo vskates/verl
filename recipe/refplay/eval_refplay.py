@@ -107,11 +107,11 @@ class EvalTaskRunner:
                 reward_manager_name = reward_manager_cfg.name
 
         reward_manager_name = reward_manager_name or "naive"
-        if reward_manager_name == "refplay_gsm8k_dense":
-            from .gsm8k_dense_reward import DenseGSM8KReward
+        if reward_manager_name in {"refplay_gsm8k_dense", "refplay_gsm8k_rule"}:
+            from .gsm8k_dense_reward import RuleBasedGSM8KReward
 
-            reward_fn = DenseGSM8KReward(tokenizer=tokenizer, num_examine=0)
-            val_reward_fn = DenseGSM8KReward(tokenizer=tokenizer, num_examine=1)
+            reward_fn = RuleBasedGSM8KReward(tokenizer=tokenizer, num_examine=0)
+            val_reward_fn = RuleBasedGSM8KReward(tokenizer=tokenizer, num_examine=1)
             reward_manager_cls = None
         elif reward_manager_name == "naive":
             from verl.workers.reward_manager import NaiveRewardManager
