@@ -48,6 +48,20 @@ def _find_pyc(package_root: Path, fullname: str):
     return None, False
 
 
+def _has_source_override(package_root: Path, fullname: str) -> bool:
+    rel_parts = fullname.split(".")[1:]
+    package_init = package_root.joinpath(*rel_parts, "__init__.py")
+    if package_init.exists():
+        return True
+
+    if rel_parts:
+        module_path = package_root.joinpath(*rel_parts[:-1], f"{rel_parts[-1]}.py")
+        if module_path.exists():
+            return True
+
+    return False
+
+
 class _PycCacheFinder(importlib.abc.MetaPathFinder):
     def __init__(self, package_name: str, package_root: Path):
         self.package_name = package_name
@@ -57,6 +71,8 @@ class _PycCacheFinder(importlib.abc.MetaPathFinder):
         if fullname == self.package_name:
             return None
         if not fullname.startswith(f"{self.package_name}."):
+            return None
+        if _has_source_override(self.package_root, fullname):
             return None
 
         pyc_path, is_package = _find_pyc(self.package_root, fullname)
