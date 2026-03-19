@@ -47,11 +47,12 @@ CUDA_VISIBLE_DEVICES=${VISIBLE_DEVICES} python3 -m recipe.refplay.main_refplay \
   actor_rollout_ref.actor.ppo_mini_batch_size=${TRAIN_BATCH_SIZE} \
   actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
   actor_rollout_ref.actor.use_torch_compile=False \
-  actor_rollout_ref.actor.fsdp_config.param_offload=False \
+  actor_rollout_ref.actor.fsdp_config.param_offload=True \
   actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
   actor_rollout_ref.actor.fsdp_config.use_torch_compile=False \
   actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
   actor_rollout_ref.ref.use_torch_compile=False \
+  actor_rollout_ref.ref.fsdp_config.param_offload=True \
   actor_rollout_ref.ref.fsdp_config.use_torch_compile=False \
   actor_rollout_ref.ref.fsdp_config.model_dtype=bfloat16 \
   actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
@@ -70,9 +71,7 @@ CUDA_VISIBLE_DEVICES=${VISIBLE_DEVICES} python3 -m recipe.refplay.main_refplay \
   trainer.test_freq=-1 \
   +trainer.log_freq=1 \
   trainer.total_epochs=1 \
-  trainer.total_training_steps=${TOTAL_STEPS} \
-  ++reference_rollout.actor.fsdp_config.param_offload=True \
-  ++reference_rollout.ref.fsdp_config.param_offload=True >> "${LOG_PATH}" 2>&1
+  trainer.total_training_steps=${TOTAL_STEPS} >> "${LOG_PATH}" 2>&1
 
 python3 -m recipe.refplay.plot_refplay_metrics "${LOG_PATH}" --output-dir "${PLOT_DIR}" >> "${LOG_PATH}" 2>&1
 
