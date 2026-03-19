@@ -3,7 +3,7 @@ set -x
 set -o pipefail
 
 VISIBLE_DEVICES="${VISIBLE_DEVICES:-3}"
-RUN_NAME="${RUN_NAME:-refplay_epoch1_strongref}"
+RUN_NAME="${RUN_NAME:-refplay_epoch1_mathref}"
 BASE_DIR="${BASE_DIR:-/workspace/verl/verl}"
 TRAIN_FILE="${TRAIN_FILE:-$HOME/data/gsm8k/train.parquet}"
 VAL_FILE="${VAL_FILE:-$HOME/data/gsm8k/test.parquet}"
@@ -14,8 +14,8 @@ CHECKPOINT_DIR="${CHECKPOINT_DIR:-${BASE_DIR}/checkpoints/${RUN_NAME}}"
 PLOT_DIR="${PLOT_DIR:-${BASE_DIR}/outputs/refplay_plots/${RUN_NAME}}"
 LOG_PATH="${LOG_PATH:-/tmp/${RUN_NAME}.log}"
 
-ACTOR_MODEL="${ACTOR_MODEL:-Qwen/Qwen2.5-Math-1.5B-Instruct}"
-REFERENCE_MODEL="${REFERENCE_MODEL:-Qwen/Qwen2.5-3B-Instruct}"
+ACTOR_MODEL="${ACTOR_MODEL:-Qwen/Qwen2.5-1.5B}"
+REFERENCE_MODEL="${REFERENCE_MODEL:-Qwen/Qwen2.5-Math-1.5B-Instruct}"
 
 TOTAL_STEPS=$(python3 - <<PY
 import math
@@ -75,6 +75,6 @@ CUDA_VISIBLE_DEVICES=${VISIBLE_DEVICES} python3 -m recipe.refplay.main_refplay \
 
 python3 -m recipe.refplay.plot_refplay_metrics "${LOG_PATH}" --output-dir "${PLOT_DIR}" >> "${LOG_PATH}" 2>&1
 
-echo "Finished 1 epoch with stronger reference."
+echo "Finished 1 epoch with math-finetuned reference."
 echo "Log: ${LOG_PATH}"
 echo "Plots: ${PLOT_DIR}"
