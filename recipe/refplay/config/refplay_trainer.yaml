@@ -38,7 +38,9 @@ reference_rollout:
     use_remove_padding: ${actor_rollout_ref.model.use_remove_padding}
     enable_gradient_checkpointing: false
     use_liger: ${actor_rollout_ref.model.use_liger}
-  actor: ${actor_rollout_ref.actor}
+  actor:
+    # The rollout-only worker only consumes actor.fsdp_config when HF rollout is used.
+    fsdp_config: ${actor_rollout_ref.actor.fsdp_config}
   ref: ${actor_rollout_ref.ref}
   rollout: ${actor_rollout_ref.rollout}
 
