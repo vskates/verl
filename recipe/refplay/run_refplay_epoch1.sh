@@ -21,6 +21,7 @@ REFERENCE_MODEL="${REFERENCE_MODEL:-Qwen/Qwen2.5-Math-1.5B-Instruct}"
 PROJECT_NAME="${PROJECT_NAME:-verl_refplay}"
 LOGGER_BACKENDS="${LOGGER_BACKENDS:-['console']}"
 ENABLE_WANDB="${ENABLE_WANDB:-0}"
+EXTRA_TRAIN_OVERRIDES="${EXTRA_TRAIN_OVERRIDES:-}"
 
 if [ "${ENABLE_WANDB}" = "1" ]; then
   LOGGER_BACKENDS="['console','wandb']"
@@ -80,7 +81,8 @@ CUDA_VISIBLE_DEVICES=${VISIBLE_DEVICES} python3 -m recipe.refplay.main_refplay \
   trainer.test_freq=-1 \
   +trainer.log_freq=1 \
   trainer.total_epochs=1 \
-  trainer.total_training_steps=${TOTAL_STEPS} >> "${LOG_PATH}" 2>&1
+  trainer.total_training_steps=${TOTAL_STEPS} \
+  ${EXTRA_TRAIN_OVERRIDES} >> "${LOG_PATH}" 2>&1
 
 python3 -m recipe.refplay.plot_refplay_metrics "${LOG_PATH}" --output-dir "${PLOT_DIR}" >> "${LOG_PATH}" 2>&1
 
