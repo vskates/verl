@@ -145,6 +145,66 @@ class RayRefPlayTrainer(RaySPINTrainer):
         return batch, reward_extra_infos_dict
 
     def _pop_generation_batch(self, batch: DataProto) -> DataProto:
+        if "input_ids" not in batch.batch:
+            raw_prompts = batch.non_tensor_batch.get("raw_prompt")
+            if raw_prompts is None:
+                raise KeyError("Expected either tokenized prompt tensors or raw_prompt in non_tensor_batch")
+
+            pad_token_id = self.tokenizer.pad_token_id
+            if pad_token_id is None:
+                pad_token_id = self.tokenizer.eos_token_id
+
+            input_ids_rows = []
+            attention_mask_rows = []
+            max_prompt_length = self.config.data.max_prompt_length
+            for raw_prompt in raw_prompts:
+                chat = raw_prompt if isinstance(raw_prompt, list) else raw_prompt.tolist()
+                prompt_text = self.tokenizer.apply_chat_template(
+                    chat,
+                    add_generation_prompt=True,
+                    tokenize=False,
+                )
+                encoded = self.tokenizer(prompt_text, return_tensors="pt", add_special_tokens=False)
+                input_ids = encoded["input_ids"][0]
+                attention_mask = encoded["attention_mask"][0]
+                if input_ids.numel() > max_prompt_length:
+                    input_ids = input_ids[-max_prompt_length:]
+                    attention_mask = attention_mask[-max_prompt_length:]
+                input_ids_rows.append(input_ids)
+                attention_mask_rows.append(attention_mask)
+
+            prompt_width = max(row.size(0) for row in input_ids_rows)
+            padded_input_ids = []
+            padded_attention_mask = []
+            padded_position_ids = []
+            for input_ids, attention_mask in zip(input_ids_rows, attention_mask_rows, strict=True):
+                pad_len = prompt_width - input_ids.size(0)
+                if pad_len > 0:
+                    input_ids = torch.cat(
+                        [torch.full((pad_len,), pad_token_id, dtype=input_ids.dtype), input_ids],
+                        dim=0,
+                    )
+                    attention_mask = torch.cat(
+                        [torch.zeros(pad_len, dtype=attention_mask.dtype), attention_mask],
+                        dim=0,
+                    )
+                position_ids = attention_mask.long().cumsum(dim=-1) - 1
+                position_ids.masked_fill_(attention_mask == 0, 0)
+                padded_input_ids.append(input_ids)
+                padded_attention_mask.append(attention_mask)
+                padded_position_ids.append(position_ids)
+
+            tensor_batch = {
+                "input_ids": torch.stack(padded_input_ids, dim=0),
+                "attention_mask": torch.stack(padded_attention_mask, dim=0),
+                "position_ids": torch.stack(padded_position_ids, dim=0),
+            }
+            non_tensor_batch = {}
+            for key in ("raw_prompt", "raw_prompt_ids", "tools_kwargs", "multi_modal_data"):
+                if key in batch.non_tensor_batch:
+                    non_tensor_batch[key] = batch.non_tensor_batch[key]
+            return DataProto.from_dict(tensors=tensor_batch, non_tensors=non_tensor_batch)
+
         batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
         non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
         if "multi_modal_data" in batch.non_tensor_batch:

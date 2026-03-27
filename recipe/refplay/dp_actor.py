@@ -47,29 +47,50 @@ class RefPlayDataParallelPPOActor(DataParallelPPOActor):
             micro_batches = batch.split(micro_batch_size)
 
         log_probs_lst = []
+        entropy_lst = []
         for micro_batch in micro_batches:
             if isinstance(micro_batch, DataProto):
                 micro_batch = {**micro_batch.batch, **micro_batch.non_tensor_batch}
+            micro_batch = {
+                key: value.to(torch.cuda.current_device()).contiguous() if torch.is_tensor(value) else value
+                for key, value in micro_batch.items()
+            }
 
             with torch.no_grad():
-                _, log_probs = self._forward_micro_batch(micro_batch, temperature=temperature)
+                outputs = self._forward_micro_batch(
+                    micro_batch,
+                    temperature=temperature,
+                    calculate_entropy=calculate_entropy,
+                )
+                if isinstance(outputs, dict):
+                    log_probs = outputs["log_probs"]
+                    entropy = outputs.get("entropys")
+                else:
+                    # Backward compatibility with older verl builds that returned tuples.
+                    _, log_probs = outputs
+                    entropy = None
             log_probs_lst.append(log_probs)
+            if calculate_entropy and entropy is not None:
+                entropy_lst.append(entropy)
         log_probs = torch.concat(log_probs_lst, dim=0)
 
         if use_dynamic_bsz:
             indices = list(itertools.chain.from_iterable(indices))
             revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)
             log_probs = log_probs[revert_indices]
+            if calculate_entropy and entropy_lst:
+                entropys = torch.concat(entropy_lst, dim=0)[revert_indices]
 
-        if not calculate_entropy and not calculate_sum_pi_squared:
-            return log_probs
-
-        extra_outputs = [log_probs]
+        outputs = {"log_probs": log_probs}
         if calculate_entropy:
-            extra_outputs.append(torch.zeros_like(log_probs))
+            if not entropy_lst:
+                entropys = torch.zeros_like(log_probs)
+            elif not use_dynamic_bsz:
+                entropys = torch.concat(entropy_lst, dim=0)
+            outputs["entropys"] = entropys
         if calculate_sum_pi_squared:
-            extra_outputs.append(torch.zeros_like(log_probs))
-        return tuple(extra_outputs)
+            outputs["sum_pi_squared"] = torch.zeros_like(log_probs)
+        return outputs
 
     def update_policy_dpo_with_ref(self, data: DataProto):
         self.actor_module.train()

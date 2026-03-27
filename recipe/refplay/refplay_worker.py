@@ -3,6 +3,7 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 
+import contextlib
 import logging
 import os
 from collections import OrderedDict
@@ -11,18 +12,138 @@ import psutil
 import torch
 from codetiming import Timer
 from omegaconf import open_dict
+from tensordict import TensorDict
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from transformers import GenerationConfig
 
 from verl import DataProto
 from verl.single_controller.base.decorator import Dispatch, register
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
+from verl.utils.device import get_device_name, get_torch_device
 from verl.utils.debug import log_gpu_memory_usage
 from verl.utils.flops_counter import FlopsCounter
 from verl.utils.fsdp_utils import load_fsdp_model_to_gpu, load_fsdp_optimizer, offload_fsdp_model_to_cpu, offload_fsdp_optimizer
 from verl.utils.import_utils import import_external_libs
+from verl.utils.torch_functional import get_response_mask
 from verl.workers.fsdp_workers import ActorRolloutRefWorker
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_PPO_LOGGING_LEVEL", "WARN"))
+
+
+class _LegacyHFRollout:
+    """Compatibility rollout for recipes that expect local HF generation."""
+
+    def __init__(self, module, config):
+        self.module = module
+        self.config = config
+
+    def generate_sequences(self, prompts: DataProto) -> DataProto:
+        batch_size = prompts.batch.batch_size[0]
+        micro_batch_size = self.config.get("micro_batch_size", batch_size) or batch_size
+        num_chunks = max(batch_size // micro_batch_size, 1)
+        outputs = [self._generate_minibatch(chunk) for chunk in prompts.chunk(chunks=num_chunks)]
+        return DataProto.concat(outputs)
+
+    @torch.no_grad()
+    def _generate_minibatch(self, prompts: DataProto) -> DataProto:
+        do_sample = prompts.meta_info.get("do_sample", self.config.do_sample)
+        is_validate = prompts.meta_info.get("validate", False)
+
+        temperature = prompts.meta_info.get("temperature", self.config.temperature)
+        response_length = prompts.meta_info.get("response_length", self.config.response_length)
+        top_p = prompts.meta_info.get("top_p", self.config.get("top_p", 1.0))
+        top_k = max(0, prompts.meta_info.get("top_k", self.config.get("top_k", 0)))
+
+        if not do_sample:
+            kwargs = {"do_sample": False, "num_beams": 1}
+        elif is_validate:
+            kwargs = {
+                "do_sample": True,
+                "num_beams": 1,
+                "top_k": max(0, self.config.val_kwargs.top_k),
+                "top_p": self.config.val_kwargs.top_p,
+                "temperature": self.config.val_kwargs.temperature,
+                "num_return_sequences": 1,
+            }
+        else:
+            kwargs = {
+                "do_sample": True,
+                "num_beams": 1,
+                "top_p": top_p,
+                "top_k": top_k,
+                "temperature": temperature,
+                "num_return_sequences": 1,
+            }
+
+        generation_config = GenerationConfig(**kwargs)
+        idx = prompts.batch["input_ids"]
+        prompt_length = idx.size(1)
+        attention_mask = prompts.batch["attention_mask"]
+        position_ids = prompts.batch["position_ids"]
+        eos_token_id = prompts.meta_info["eos_token_id"]
+        pad_token_id = prompts.meta_info["pad_token_id"]
+
+        self.module.eval()
+        param_ctx = contextlib.nullcontext()
+        if isinstance(self.module, FSDP):
+            param_ctx = FSDP.summon_full_params(self.module, writeback=False, recurse=False)
+
+        with param_ctx, torch.autocast(device_type=get_device_name(), dtype=torch.bfloat16):
+            output = self.module.generate(
+                input_ids=idx,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                do_sample=do_sample,
+                max_new_tokens=response_length,
+                eos_token_id=eos_token_id,
+                pad_token_id=pad_token_id,
+                generation_config=generation_config,
+                output_scores=False,
+                return_dict_in_generate=True,
+                use_cache=True,
+            )
+
+        seq = output.sequences
+        generated_batch_size = seq.size(0)
+        sequence_length = prompt_length + self.config.response_length
+        delta_length = sequence_length - seq.shape[1]
+        if delta_length > 0:
+            delta_tokens = torch.full(
+                (generated_batch_size, delta_length),
+                pad_token_id,
+                device=seq.device,
+                dtype=seq.dtype,
+            )
+            seq = torch.cat((seq, delta_tokens), dim=1)
+
+        prompt = seq[:, :prompt_length]
+        response = seq[:, prompt_length:]
+        response_length = response.size(1)
+        delta_position_id = torch.arange(1, response_length + 1, device=position_ids.device)
+        delta_position_id = delta_position_id.unsqueeze(0).repeat(generated_batch_size, 1)
+        response_position_ids = position_ids[:, -1:] + delta_position_id
+        position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
+        response_attention_mask = get_response_mask(
+            response_id=response,
+            eos_token=eos_token_id,
+            dtype=attention_mask.dtype,
+        )
+        attention_mask = torch.cat((attention_mask, response_attention_mask), dim=-1)
+
+        batch = TensorDict(
+            {
+                "prompts": prompt,
+                "responses": response,
+                "input_ids": seq,
+                "attention_mask": attention_mask,
+                "position_ids": position_ids,
+            },
+            batch_size=generated_batch_size,
+        )
+        get_torch_device().empty_cache()
+        self.module.train()
+        return DataProto(batch=batch)
 
 
 class RefPlayActorRolloutRefWorker(ActorRolloutRefWorker):
@@ -40,6 +161,21 @@ class RefPlayActorRolloutRefWorker(ActorRolloutRefWorker):
             return False
         return param.device.type == "cpu"
 
+    def _build_rollout(self, trust_remote_code=False):
+        if self.config.rollout.name != "hf":
+            result = super()._build_rollout(trust_remote_code=trust_remote_code)
+            if isinstance(result, tuple):
+                return result
+            return self.rollout, getattr(self, "rollout_sharding_manager", self.ulysses_sharding_manager)
+
+        self._register_dispatch_collect_info("rollout", dp_rank=self.rank, is_collect=True)
+        self.rollout_device_mesh = self.device_mesh
+        self.rollout = _LegacyHFRollout(module=self.actor_module_fsdp, config=self.config.rollout)
+        self.base_sync_done = True
+        self.layered_summon = self.config.rollout.get("layered_summon", False)
+        self.rollout_sharding_manager = self.ulysses_sharding_manager
+        return self.rollout, self.rollout_sharding_manager
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
         from .dp_actor import RefPlayDataParallelPPOActor
@@ -50,6 +186,16 @@ class RefPlayActorRolloutRefWorker(ActorRolloutRefWorker):
 
         override_model_config = OmegaConf.to_container(self.config.model.get("override_config", OmegaConf.create()))
         use_remove_padding = self.config.model.get("use_remove_padding", False)
+
+        # Newer verl builds expect QAT state to exist before _build_model_optimizer()
+        # is called, but older refplay recipes never initialized it explicitly.
+        if not hasattr(self, "_qat_enabled"):
+            init_qat_config = getattr(self, "_init_qat_config", None)
+            if callable(init_qat_config):
+                init_qat_config()
+            else:
+                self._qat_enabled = False
+                self.qat_config = None
 
         if self._is_actor or self._is_rollout:
             if self._is_actor:
@@ -196,6 +342,15 @@ class RefPlayActorRolloutRefWorker(ActorRolloutRefWorker):
                     generation_config.pad_token_id = pad_token_id
             if getattr(self.tokenizer, "pad_token_id", None) is None and pad_token_id is not None:
                 self.tokenizer.pad_token_id = pad_token_id
+
+            if self.config.rollout.name == "hf":
+                prompts = prompts.to(torch.cuda.current_device())
+                prompts.meta_info.update({"eos_token_id": eos_token_id, "pad_token_id": pad_token_id})
+                output = self.rollout.generate_sequences(prompts=prompts)
+                output = output.to("cpu")
+                get_torch_device().empty_cache()
+                return output
+
             return super().generate_sequences(prompts)
         finally:
             if loaded_for_rollout and (self._is_offload_param or not self._is_actor):
