@@ -72,6 +72,52 @@ class RayRefPlayTrainer(RaySPINTrainer):
         self.actor_rollout_wg = all_wg["actor_rollout"]
         self.actor_rollout_wg.init_model()
 
+    def _load_checkpoint(self):
+        resume_weights_only = bool(OmegaConf.select(self.config, "trainer.resume_weights_only", default=False))
+        if not resume_weights_only:
+            return super()._load_checkpoint()
+
+        if self.config.trainer.resume_mode == "disable":
+            return 0
+
+        checkpoint_folder = self.config.trainer.default_local_dir
+        if not os.path.isabs(checkpoint_folder):
+            checkpoint_folder = os.path.join(os.getcwd(), checkpoint_folder)
+
+        if self.config.trainer.resume_mode == "auto":
+            from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
+
+            global_step_folder = find_latest_ckpt_path(checkpoint_folder)
+            if global_step_folder is None:
+                print("Training from scratch")
+                return 0
+        elif self.config.trainer.resume_mode == "resume_path":
+            global_step_folder = self.config.trainer.resume_from_path
+            if not os.path.isabs(global_step_folder):
+                global_step_folder = os.path.join(os.getcwd(), global_step_folder)
+        else:
+            raise NotImplementedError(f"Unsupported resume_mode for weights-only resume: {self.config.trainer.resume_mode}")
+
+        print(f"Load model-only checkpoint folder: {global_step_folder}")
+        self.global_steps = int(global_step_folder.split("global_step_")[-1])
+        print(f"Setting global step to {self.global_steps}")
+        print(f"Resuming weights-only from {global_step_folder}")
+
+        actor_path = os.path.join(global_step_folder, "actor")
+        self.actor_rollout_wg.load_model_checkpoint_only(
+            actor_path,
+            del_local_after_load=self.config.trainer.del_local_ckpt_after_load,
+        )
+
+        dataloader_local_path = os.path.join(global_step_folder, "data.pt")
+        if os.path.exists(dataloader_local_path):
+            dataloader_state_dict = torch.load(dataloader_local_path, weights_only=False)
+            self.train_dataloader.load_state_dict(dataloader_state_dict)
+        else:
+            print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
+
+        return self.global_steps
+
     def _score_batch(self, batch: DataProto, reward_callable=None):
         reward_extra_infos_dict = {}
         if self.use_rm:
@@ -111,12 +157,33 @@ class RayRefPlayTrainer(RaySPINTrainer):
 
     def _build_eval_gen_batch(self, batch: DataProto) -> DataProto:
         gen_batch = self._pop_generation_batch(batch)
+        pad_token_id = self.tokenizer.pad_token_id
+        if pad_token_id is None:
+            pad_token_id = self.tokenizer.eos_token_id
         gen_batch.meta_info = {
             "eos_token_id": self.tokenizer.eos_token_id,
-            "pad_token_id": self.tokenizer.pad_token_id,
+            "pad_token_id": pad_token_id,
             "recompute_log_prob": False,
             "do_sample": self.config.actor_rollout_ref.rollout.val_kwargs.do_sample,
             "validate": True,
+        }
+        return gen_batch
+
+    def _build_train_gen_batch(self, batch: DataProto) -> DataProto:
+        gen_batch = self._pop_generation_batch(batch)
+        pad_token_id = self.tokenizer.pad_token_id
+        if pad_token_id is None:
+            pad_token_id = self.tokenizer.eos_token_id
+        gen_batch.meta_info = {
+            "eos_token_id": self.tokenizer.eos_token_id,
+            "pad_token_id": pad_token_id,
+            "recompute_log_prob": False,
+            "do_sample": self.config.actor_rollout_ref.rollout.do_sample,
+            "validate": False,
+            "temperature": self.config.actor_rollout_ref.rollout.temperature,
+            "top_p": self.config.actor_rollout_ref.rollout.top_p,
+            "top_k": self.config.actor_rollout_ref.rollout.top_k,
+            "response_length": self.config.actor_rollout_ref.rollout.response_length,
         }
         return gen_batch
 
@@ -421,15 +488,7 @@ class RayRefPlayTrainer(RaySPINTrainer):
                 timing_raw = {}
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
 
-                batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
-                non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
-                if "multi_modal_data" in batch.non_tensor_batch:
-                    non_tensor_batch_keys_to_pop.append("multi_modal_data")
-                if "raw_prompt" in batch.non_tensor_batch:
-                    non_tensor_batch_keys_to_pop.append("raw_prompt")
-                if "tools_kwargs" in batch.non_tensor_batch:
-                    non_tensor_batch_keys_to_pop.append("tools_kwargs")
-                gen_batch = batch.pop(batch_keys=batch_keys_to_pop, non_tensor_batch_keys=non_tensor_batch_keys_to_pop)
+                gen_batch = self._build_train_gen_batch(batch)
 
                 is_last_step = self.global_steps >= self.total_training_steps
                 debug_step = self.global_steps <= 2
@@ -502,7 +561,14 @@ class RayRefPlayTrainer(RaySPINTrainer):
                             last_val_metrics = val_metrics
                     metrics.update(val_metrics)
 
-                if self.config.trainer.save_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.save_freq == 0):
+                should_save = False
+                if self.config.trainer.save_freq > 0:
+                    should_save = (
+                        is_last_step
+                        or self.global_steps == 1
+                        or self.global_steps % self.config.trainer.save_freq == 0
+                    )
+                if should_save:
                     with _timer("save_checkpoint", timing_raw):
                         self._save_checkpoint()
 

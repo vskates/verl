@@ -5,6 +5,7 @@
 
 import logging
 import os
+from collections import OrderedDict
 
 import psutil
 import torch
@@ -166,6 +167,35 @@ class RefPlayActorRolloutRefWorker(ActorRolloutRefWorker):
             load_fsdp_model_to_gpu(rollout_module)
 
         try:
+            eos_token_id = prompts.meta_info.get("eos_token_id")
+            if eos_token_id is None:
+                eos_token_id = getattr(self.tokenizer, "eos_token_id", None)
+
+            pad_token_id = prompts.meta_info.get("pad_token_id")
+            if pad_token_id is None:
+                pad_token_id = getattr(self.tokenizer, "pad_token_id", None)
+            if pad_token_id is None:
+                generation_config = getattr(self, "generation_config", None)
+                pad_token_id = getattr(generation_config, "pad_token_id", None)
+            if pad_token_id is None:
+                pad_token_id = eos_token_id
+
+            if prompts.meta_info.get("eos_token_id") is None and eos_token_id is not None:
+                prompts.meta_info["eos_token_id"] = eos_token_id
+            if prompts.meta_info.get("pad_token_id") is None and pad_token_id is not None:
+                prompts.meta_info["pad_token_id"] = pad_token_id
+
+            # Base ActorRolloutRefWorker overwrites prompt meta_info from
+            # self.generation_config/tokenizer, so keep the worker-level source
+            # consistent too.
+            generation_config = getattr(self, "generation_config", None)
+            if generation_config is not None:
+                if getattr(generation_config, "eos_token_id", None) is None and eos_token_id is not None:
+                    generation_config.eos_token_id = eos_token_id
+                if getattr(generation_config, "pad_token_id", None) is None and pad_token_id is not None:
+                    generation_config.pad_token_id = pad_token_id
+            if getattr(self.tokenizer, "pad_token_id", None) is None and pad_token_id is not None:
+                self.tokenizer.pad_token_id = pad_token_id
             return super().generate_sequences(prompts)
         finally:
             if loaded_for_rollout and (self._is_offload_param or not self._is_actor):
@@ -204,3 +234,28 @@ class RefPlayActorRolloutRefWorker(ActorRolloutRefWorker):
 
         log_gpu_memory_usage("After refplay actor update", logger=logger)
         return output
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def load_model_checkpoint_only(self, local_path, del_local_after_load=True):
+        import torch
+
+        assert self._is_actor
+
+        if self._is_offload_param:
+            load_fsdp_model_to_gpu(self.actor_module_fsdp)
+
+        model_path = os.path.join(local_path, "model_world_size_1_rank_0.pt")
+        state_dict = torch.load(model_path, map_location="cpu", weights_only=False)
+        if not isinstance(state_dict, OrderedDict):
+            raise TypeError(f"Expected OrderedDict state dict in {model_path}, got {type(state_dict)}")
+
+        self.actor_module_fsdp.load_state_dict(state_dict, strict=True)
+
+        torch.distributed.barrier()
+        if self._is_offload_param:
+            offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+
+        if del_local_after_load:
+            # Keep parity with checkpoint_manager.load_checkpoint signature,
+            # but never delete the source checkpoint during resume.
+            pass

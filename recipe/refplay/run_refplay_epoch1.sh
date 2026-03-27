@@ -38,6 +38,15 @@ print(math.ceil(num_rows / batch_size))
 PY
 )
 
+NUM_CHECKPOINTS="${NUM_CHECKPOINTS:-10}"
+SAVE_FREQ=$(python3 - <<PY
+import math
+total_steps = int("${TOTAL_STEPS}")
+num_checkpoints = max(1, int("${NUM_CHECKPOINTS}"))
+print(max(1, math.ceil(total_steps / num_checkpoints)))
+PY
+)
+
 export HYDRA_FULL_ERROR=1
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
@@ -77,7 +86,7 @@ CUDA_VISIBLE_DEVICES=${VISIBLE_DEVICES} python3 -m recipe.refplay.main_refplay \
   trainer.default_hdfs_dir=null \
   trainer.n_gpus_per_node=1 \
   trainer.nnodes=1 \
-  trainer.save_freq=${TOTAL_STEPS} \
+  trainer.save_freq=${SAVE_FREQ} \
   trainer.test_freq=-1 \
   +trainer.log_freq=1 \
   trainer.total_epochs=1 \
@@ -90,3 +99,4 @@ echo "Finished 1 epoch."
 echo "Log: ${LOG_PATH}"
 echo "Plots: ${PLOT_DIR}"
 echo "Checkpoint: ${CHECKPOINT_DIR}/global_step_${TOTAL_STEPS}"
+echo "Checkpoint interval: every ${SAVE_FREQ} steps (~${NUM_CHECKPOINTS} saves total)"
