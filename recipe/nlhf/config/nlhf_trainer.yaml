@@ -1,0 +1,73 @@
+hydra:
+  searchpath:
+    - file://${oc.env:PWD}/verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+policy_a:
+  actor:
+    dpo_beta: 0.1
+    grad_norm_threshold: 1.0e9
+    checkpoint:
+      contents: ${.load_contents}
+    optim:
+      lr_warmup_steps: 15
+      warmup_style: constant
+  rollout:
+    name: hf
+    tensor_model_parallel_size: 1
+    gpu_memory_utilization: 0.4
+    n: 1
+    val_kwargs:
+      n: 1
+
+data:
+  seed: 42
+
+policy_b:
+  hybrid_engine: true
+  model:
+    path: ${policy_a.model.path}
+    tokenizer_path: ${policy_a.model.tokenizer_path}
+    trust_remote_code: ${policy_a.model.trust_remote_code}
+    use_remove_padding: ${policy_a.model.use_remove_padding}
+    enable_gradient_checkpointing: ${policy_a.model.enable_gradient_checkpointing}
+    use_liger: ${policy_a.model.use_liger}
+  actor: ${policy_a.actor}
+  ref: ${policy_a.ref}
+  rollout: ${policy_a.rollout}
+
+anchor_rollout:
+  hybrid_engine: true
+  model:
+    path: ${policy_a.model.path}
+    tokenizer_path: ${policy_a.model.tokenizer_path}
+    trust_remote_code: ${policy_a.model.trust_remote_code}
+    use_remove_padding: ${policy_a.model.use_remove_padding}
+    enable_gradient_checkpointing: false
+    use_liger: ${policy_a.model.use_liger}
+  actor: ${policy_a.actor}
+  ref: ${policy_a.ref}
+  rollout: ${policy_a.rollout}
+
+algorithm:
+  adv_estimator: null
+  dpo_beta: 0.1
+  dpo_loss_type: sigmoid
+  dpo_label_smoothing: 0.0
+  update_mode: alternating
+  use_kl_in_reward: false
+
+trainer:
+  project_name: verl_nlhf
+  experiment_name: gsm8k_nlhf
+  default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
+  log_val_generations: 0
+  resume_mode: disable
+  resume_weights_only: false
+
+evaluation:
+  max_samples: null
+
