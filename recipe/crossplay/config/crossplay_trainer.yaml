@@ -1,0 +1,107 @@
+hydra:
+  searchpath:
+    - file://${oc.env:PWD}/verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+actor_rollout_ref:
+  hybrid_engine: true
+  model:
+    path: Qwen/Qwen2.5-0.5B-Instruct
+    tokenizer_path: null
+    trust_remote_code: false
+    use_remove_padding: true
+    enable_gradient_checkpointing: true
+    use_liger: false
+  actor:
+    dpo_beta: 0.1
+    grad_norm_threshold: 1.0e9
+    checkpoint:
+      contents: ${.load_contents}
+    optim:
+      lr_warmup_steps: 15
+      warmup_style: constant
+  rollout:
+    name: hf
+    tensor_model_parallel_size: 1
+    gpu_memory_utilization: 0.35
+    n: 1
+    val_kwargs:
+      n: 1
+
+policy_a:
+  hybrid_engine: ${actor_rollout_ref.hybrid_engine}
+  model: ${actor_rollout_ref.model}
+  actor: ${actor_rollout_ref.actor}
+  ref: ${actor_rollout_ref.ref}
+  rollout: ${actor_rollout_ref.rollout}
+
+data:
+  seed: 42
+
+policy_b:
+  hybrid_engine: true
+  model:
+    path: HuggingFaceTB/SmolLM2-360M-Instruct
+    tokenizer_path: null
+    trust_remote_code: false
+    use_remove_padding: true
+    enable_gradient_checkpointing: true
+    use_liger: false
+  actor: ${actor_rollout_ref.actor}
+  ref: ${actor_rollout_ref.ref}
+  rollout: ${actor_rollout_ref.rollout}
+
+anchor_a:
+  hybrid_engine: true
+  model:
+    path: ${policy_a.model.path}
+    tokenizer_path: ${policy_a.model.tokenizer_path}
+    trust_remote_code: ${policy_a.model.trust_remote_code}
+    use_remove_padding: ${policy_a.model.use_remove_padding}
+    enable_gradient_checkpointing: false
+    use_liger: ${policy_a.model.use_liger}
+  actor: ${actor_rollout_ref.actor}
+  ref: ${actor_rollout_ref.ref}
+  rollout: ${actor_rollout_ref.rollout}
+
+anchor_b:
+  hybrid_engine: true
+  model:
+    path: ${policy_b.model.path}
+    tokenizer_path: ${policy_b.model.tokenizer_path}
+    trust_remote_code: ${policy_b.model.trust_remote_code}
+    use_remove_padding: ${policy_b.model.use_remove_padding}
+    enable_gradient_checkpointing: false
+    use_liger: ${policy_b.model.use_liger}
+  actor: ${actor_rollout_ref.actor}
+  ref: ${actor_rollout_ref.ref}
+  rollout: ${actor_rollout_ref.rollout}
+
+algorithm:
+  adv_estimator: null
+  dpo_beta: 0.1
+  dpo_loss_type: sigmoid
+  dpo_label_smoothing: 0.0
+  update_mode: both
+  update_on_ties: false
+  focus_failed_examples_only: true
+  benchmark_field: data_source
+  use_reference_policy: true
+
+trainer:
+  project_name: verl_crossplay
+  experiment_name: benchmark_duel
+  default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
+  log_val_generations: 0
+  resume_mode: disable
+  resume_weights_only: false
+
+evaluation:
+  max_samples: null
+
+reward:
+  reward_manager:
+    name: crossplay_gsm8k_rule
