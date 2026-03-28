@@ -6,7 +6,15 @@ defaults:
   - ppo_trainer
   - _self_
 
-policy_a:
+actor_rollout_ref:
+  hybrid_engine: true
+  model:
+    path: Qwen/Qwen2.5-0.5B-Instruct
+    tokenizer_path: null
+    trust_remote_code: false
+    use_remove_padding: true
+    enable_gradient_checkpointing: true
+    use_liger: false
   actor:
     dpo_beta: 0.1
     grad_norm_threshold: 1.0e9
@@ -18,51 +26,67 @@ policy_a:
   rollout:
     name: hf
     tensor_model_parallel_size: 1
-    gpu_memory_utilization: 0.4
+    gpu_memory_utilization: 0.35
     n: 1
     val_kwargs:
       n: 1
 
+main_policy:
+  hybrid_engine: ${actor_rollout_ref.hybrid_engine}
+  model:
+    path: ${actor_rollout_ref.model.path}
+    tokenizer_path: ${actor_rollout_ref.model.tokenizer_path}
+    trust_remote_code: ${actor_rollout_ref.model.trust_remote_code}
+    use_remove_padding: ${actor_rollout_ref.model.use_remove_padding}
+    enable_gradient_checkpointing: ${actor_rollout_ref.model.enable_gradient_checkpointing}
+    use_liger: ${actor_rollout_ref.model.use_liger}
+  actor: ${actor_rollout_ref.actor}
+  ref: ${actor_rollout_ref.ref}
+  rollout: ${actor_rollout_ref.rollout}
+
+alternative_policy:
+  hybrid_engine: true
+  model:
+    path: ${main_policy.model.path}
+    tokenizer_path: ${main_policy.model.tokenizer_path}
+    trust_remote_code: ${main_policy.model.trust_remote_code}
+    use_remove_padding: ${main_policy.model.use_remove_padding}
+    enable_gradient_checkpointing: false
+    use_liger: ${main_policy.model.use_liger}
+  actor: ${main_policy.actor}
+  ref: ${main_policy.ref}
+  rollout: ${main_policy.rollout}
+
+reference_policy:
+  hybrid_engine: true
+  model:
+    path: ${main_policy.model.path}
+    tokenizer_path: ${main_policy.model.tokenizer_path}
+    trust_remote_code: ${main_policy.model.trust_remote_code}
+    use_remove_padding: ${main_policy.model.use_remove_padding}
+    enable_gradient_checkpointing: false
+    use_liger: ${main_policy.model.use_liger}
+  actor: ${main_policy.actor}
+  ref: ${main_policy.ref}
+  rollout: ${main_policy.rollout}
+
 data:
   seed: 42
 
-policy_b:
-  hybrid_engine: true
-  model:
-    path: ${policy_a.model.path}
-    tokenizer_path: ${policy_a.model.tokenizer_path}
-    trust_remote_code: ${policy_a.model.trust_remote_code}
-    use_remove_padding: ${policy_a.model.use_remove_padding}
-    enable_gradient_checkpointing: ${policy_a.model.enable_gradient_checkpointing}
-    use_liger: ${policy_a.model.use_liger}
-  actor: ${policy_a.actor}
-  ref: ${policy_a.ref}
-  rollout: ${policy_a.rollout}
-
-anchor_rollout:
-  hybrid_engine: true
-  model:
-    path: ${policy_a.model.path}
-    tokenizer_path: ${policy_a.model.tokenizer_path}
-    trust_remote_code: ${policy_a.model.trust_remote_code}
-    use_remove_padding: ${policy_a.model.use_remove_padding}
-    enable_gradient_checkpointing: false
-    use_liger: ${policy_a.model.use_liger}
-  actor: ${policy_a.actor}
-  ref: ${policy_a.ref}
-  rollout: ${policy_a.rollout}
-
 algorithm:
   adv_estimator: null
-  dpo_beta: 0.1
-  dpo_loss_type: sigmoid
-  dpo_label_smoothing: 0.0
-  update_mode: alternating
-  use_kl_in_reward: false
+  tau: 0.05
+  center_preferences: true
+  benchmark_field: data_source
+  preference_source: pairwise_probability
+  reward_temperature: 1.0
+  alternative_policy_strategy: nash_ema_pg
+  alternative_policy_ema_decay: 0.95
+  alternative_policy_sync_freq: 1
 
 trainer:
   project_name: verl_nlhf
-  experiment_name: gsm8k_nlhf
+  experiment_name: gsm8k_nlhf_exact
   default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
   log_val_generations: 0
   resume_mode: disable
@@ -71,3 +95,6 @@ trainer:
 evaluation:
   max_samples: null
 
+reward:
+  reward_manager:
+    name: nlhf_gsm8k_pairwise
