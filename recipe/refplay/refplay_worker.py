@@ -292,7 +292,13 @@ class RefPlayActorRolloutRefWorker(ActorRolloutRefWorker):
             with self.ulysses_sharding_manager:
                 data = self.ulysses_sharding_manager.preprocess_data(data)
                 output = self.ref_policy.compute_log_prob(data=data)
-                output = DataProto.from_dict(tensors={"ref_log_prob": output})
+                if isinstance(output, dict):
+                    ref_log_prob = output.get("log_probs")
+                    if ref_log_prob is None:
+                        raise KeyError("Expected ref_policy.compute_log_prob() to return 'log_probs'")
+                else:
+                    ref_log_prob = output
+                output = DataProto.from_dict(tensors={"ref_log_prob": ref_log_prob})
                 output = self.ulysses_sharding_manager.postprocess_data(output)
 
             output = output.to("cpu")

@@ -90,12 +90,17 @@ algorithm:
   focus_failed_examples_only: true
   benchmark_field: data_source
   use_reference_policy: true
+  replay_buffer_size_per_benchmark: 64
+  benchmark_replay_power: 1.5
+  allow_buffer_only_updates: true
+  buffer_only_update_batch_size: ${data.train_batch_size}
 
 trainer:
   project_name: verl_crossplay
-  experiment_name: benchmark_duel
+  experiment_name: benchmark_duel_refdpo
   default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
   log_val_generations: 0
+  colocate_anchor_with_policy: true
   resume_mode: disable
   resume_weights_only: false
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euxo pipefail
 
-VISIBLE_DEVICES="${VISIBLE_DEVICES:-2,5}"
+VISIBLE_DEVICES="${VISIBLE_DEVICES:-2,4}"
 RUN_NAME="${RUN_NAME:-crossplay_smoke}"
 TRAIN_FILE="${TRAIN_FILE:-/root/data/gsm8k/train.parquet}"
 VAL_FILE="${VAL_FILE:-/root/data/gsm8k/test.parquet}"
@@ -27,7 +27,9 @@ CUDA_VISIBLE_DEVICES="$VISIBLE_DEVICES" python3 -m recipe.crossplay.main_crosspl
   reward.reward_manager.name=crossplay_gsm8k_rule \
   algorithm.update_mode=both \
   algorithm.focus_failed_examples_only=true \
-  algorithm.use_reference_policy=false \
+  algorithm.use_reference_policy=true \
+  algorithm.replay_buffer_size_per_benchmark=16 \
+  algorithm.buffer_only_update_batch_size=2 \
   'trainer.logger=[console]' \
   trainer.project_name=verl_crossplay \
   trainer.experiment_name="$RUN_NAME" \
@@ -35,6 +37,6 @@ CUDA_VISIBLE_DEVICES="$VISIBLE_DEVICES" python3 -m recipe.crossplay.main_crosspl
   trainer.test_freq=-1 \
   trainer.n_gpus_per_node=2 \
   trainer.nnodes=1 \
-  trainer.save_freq="$TOTAL_STEPS" \
+  trainer.save_freq=1 \
   trainer.total_epochs=1 \
   trainer.total_training_steps="$TOTAL_STEPS"

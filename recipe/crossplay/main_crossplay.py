@@ -60,40 +60,41 @@ class TaskRunner:
         processor = hf_processor(policy_a_local_path, use_fast=True)
 
         use_reference_policy = bool(config.algorithm.get("use_reference_policy", True))
+        if not use_reference_policy:
+            raise ValueError("CrossPlay ideal pipeline requires use_reference_policy=true")
+        colocate_anchor_with_policy = bool(OmegaConf.select(config, "trainer.colocate_anchor_with_policy", default=True))
 
         role_worker_mapping = {
             Role.ActorRollout: ray.remote(CrossPlayActorRolloutRefWorker),
             Role.Actor: ray.remote(CrossPlayActorRolloutRefWorker),
+            Role.Rollout: ray.remote(CrossPlayActorRolloutRefWorker),
+            Role.RefPolicy: ray.remote(CrossPlayActorRolloutRefWorker),
         }
-        if use_reference_policy:
-            role_worker_mapping.update(
-                {
-                    Role.Rollout: ray.remote(CrossPlayActorRolloutRefWorker),
-                    Role.RefPolicy: ray.remote(CrossPlayActorRolloutRefWorker),
-                }
-            )
 
-        resource_pool_spec = {
-            "policy_a_pool": [1] * config.trainer.nnodes,
-            "policy_b_pool": [1] * config.trainer.nnodes,
-        }
-        mapping = {
-            Role.ActorRollout: "policy_a_pool",
-            Role.Actor: "policy_b_pool",
-        }
-        if use_reference_policy:
-            resource_pool_spec.update(
-                {
-                    "anchor_a_pool": [1] * config.trainer.nnodes,
-                    "anchor_b_pool": [1] * config.trainer.nnodes,
-                }
-            )
-            mapping.update(
-                {
-                    Role.Rollout: "anchor_a_pool",
-                    Role.RefPolicy: "anchor_b_pool",
-                }
-            )
+        if colocate_anchor_with_policy:
+            resource_pool_spec = {
+                "policy_a_pool": [1] * config.trainer.nnodes,
+                "policy_b_pool": [1] * config.trainer.nnodes,
+            }
+            mapping = {
+                Role.ActorRollout: "policy_a_pool",
+                Role.Rollout: "policy_a_pool",
+                Role.Actor: "policy_b_pool",
+                Role.RefPolicy: "policy_b_pool",
+            }
+        else:
+            resource_pool_spec = {
+                "policy_a_pool": [1] * config.trainer.nnodes,
+                "policy_b_pool": [1] * config.trainer.nnodes,
+                "anchor_a_pool": [1] * config.trainer.nnodes,
+                "anchor_b_pool": [1] * config.trainer.nnodes,
+            }
+            mapping = {
+                Role.ActorRollout: "policy_a_pool",
+                Role.Actor: "policy_b_pool",
+                Role.Rollout: "anchor_a_pool",
+                Role.RefPolicy: "anchor_b_pool",
+            }
 
         reward_manager_name = None
         reward_cfg = config.get("reward")

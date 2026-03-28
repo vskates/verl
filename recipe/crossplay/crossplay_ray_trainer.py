@@ -29,10 +29,28 @@ class RayCrossPlayTrainer(RaySPINTrainer):
         super().__init__(*args, reward_fn=None, val_reward_fn=None, **kwargs)
         self.policy_tokenizers = policy_tokenizers
         self.text_judge = text_judge
-        self.benchmark_stats = defaultdict(lambda: {"count": 0, "policy_a_wins": 0, "policy_b_wins": 0, "ties": 0})
+        self.benchmark_stats = defaultdict(self._make_benchmark_state)
         self.use_reference_policy = bool(self.config.algorithm.get("use_reference_policy", True))
+        if not self.use_reference_policy:
+            raise ValueError("CrossPlay ideal pipeline requires per-policy frozen anchors and reference DPO")
+        self.policy_failure_replay = {
+            "policy_a": defaultdict(list),
+            "policy_b": defaultdict(list),
+        }
+        self.replay_rng = np.random.default_rng(int(self.config.data.get("seed", 0)))
         self.anchor_a_wg = None
         self.anchor_b_wg = None
+
+    @staticmethod
+    def _make_benchmark_state():
+        return {
+            "count": 0,
+            "policy_a_wins": 0,
+            "policy_b_wins": 0,
+            "ties": 0,
+            "policy_a_reward_sum": 0.0,
+            "policy_b_reward_sum": 0.0,
+        }
 
     def init_workers(self):
         self.resource_pool_manager.create_resource_pool()
@@ -139,9 +157,15 @@ class RayCrossPlayTrainer(RaySPINTrainer):
             benchmark_stats = trainer_state.get("benchmark_stats")
             if benchmark_stats is not None:
                 self.benchmark_stats = defaultdict(
-                    lambda: {"count": 0, "policy_a_wins": 0, "policy_b_wins": 0, "ties": 0},
+                    self._make_benchmark_state,
                     benchmark_stats,
                 )
+            failure_replay = trainer_state.get("policy_failure_replay")
+            if failure_replay is not None:
+                self.policy_failure_replay = {
+                    "policy_a": defaultdict(list, failure_replay.get("policy_a", {})),
+                    "policy_b": defaultdict(list, failure_replay.get("policy_b", {})),
+                }
         return self.global_steps
 
     def _save_checkpoint(self):
@@ -153,6 +177,10 @@ class RayCrossPlayTrainer(RaySPINTrainer):
         trainer_state = {
             "dataloader": self.train_dataloader.state_dict(),
             "benchmark_stats": dict(self.benchmark_stats),
+            "policy_failure_replay": {
+                "policy_a": dict(self.policy_failure_replay["policy_a"]),
+                "policy_b": dict(self.policy_failure_replay["policy_b"]),
+            },
         }
         torch.save(trainer_state, os.path.join(local_global_step_folder, "trainer_state.pt"))
 
@@ -469,6 +497,99 @@ class RayCrossPlayTrainer(RaySPINTrainer):
             selected_rejected.append(rejected_texts[idx])
         return selected_prompts, selected_benchmarks, selected_chosen, selected_rejected
 
+    def _record_policy_failures(
+        self,
+        *,
+        policy_name: str,
+        raw_prompts: list[Any],
+        benchmark_ids: list[str],
+        chosen_texts: list[str],
+        rejected_texts: list[str],
+    ) -> None:
+        max_per_benchmark = int(self.config.algorithm.get("replay_buffer_size_per_benchmark", 64))
+        replay_store = self.policy_failure_replay[policy_name]
+        for raw_prompt, benchmark_id, chosen_text, rejected_text in zip(
+            raw_prompts, benchmark_ids, chosen_texts, rejected_texts, strict=True
+        ):
+            replay_store[benchmark_id].append(
+                {
+                    "raw_prompt": deepcopy(raw_prompt),
+                    "benchmark_id": benchmark_id,
+                    "chosen_text": chosen_text,
+                    "rejected_text": rejected_text,
+                }
+            )
+            if len(replay_store[benchmark_id]) > max_per_benchmark:
+                replay_store[benchmark_id] = replay_store[benchmark_id][-max_per_benchmark:]
+
+    def _benchmark_priority(self, policy_name: str, benchmark_id: str) -> float:
+        state = self.benchmark_stats.get(benchmark_id)
+        if state is None or state["count"] <= 0:
+            return 1.0
+        count = float(max(state["count"], 1))
+        if policy_name == "policy_a":
+            own_wins = state["policy_a_wins"] / count
+            opp_wins = state["policy_b_wins"] / count
+            reward_gap = (state["policy_b_reward_sum"] - state["policy_a_reward_sum"]) / count
+        else:
+            own_wins = state["policy_b_wins"] / count
+            opp_wins = state["policy_a_wins"] / count
+            reward_gap = (state["policy_a_reward_sum"] - state["policy_b_reward_sum"]) / count
+        deficit = max(opp_wins - own_wins, 0.0)
+        reward_deficit = max(reward_gap, 0.0)
+        return 1.0 + deficit + reward_deficit
+
+    def _sample_benchmark_replay_examples(self, policy_name: str, requested_count: int) -> tuple[list[Any], list[str], list[str], list[str]]:
+        replay_store = self.policy_failure_replay[policy_name]
+        available = {benchmark_id: items for benchmark_id, items in replay_store.items() if items}
+        if requested_count <= 0 or not available:
+            return [], [], [], []
+
+        benchmark_ids = list(available.keys())
+        priorities = np.asarray(
+            [self._benchmark_priority(policy_name, benchmark_id) for benchmark_id in benchmark_ids],
+            dtype=np.float64,
+        )
+        replay_power = float(self.config.algorithm.get("benchmark_replay_power", 1.0))
+        priorities = np.power(np.maximum(priorities, 1e-6), replay_power)
+        probabilities = priorities / priorities.sum()
+
+        prompts = []
+        selected_benchmarks = []
+        chosen = []
+        rejected = []
+        for _ in range(requested_count):
+            benchmark_idx = int(self.replay_rng.choice(len(benchmark_ids), p=probabilities))
+            benchmark_id = benchmark_ids[benchmark_idx]
+            sample = available[benchmark_id][int(self.replay_rng.integers(len(available[benchmark_id])))]
+            prompts.append(deepcopy(sample["raw_prompt"]))
+            selected_benchmarks.append(sample["benchmark_id"])
+            chosen.append(sample["chosen_text"])
+            rejected.append(sample["rejected_text"])
+        return prompts, selected_benchmarks, chosen, rejected
+
+    def _select_update_examples(
+        self,
+        *,
+        policy_name: str,
+        fresh_prompts: list[Any],
+        fresh_benchmarks: list[str],
+        fresh_chosen: list[str],
+        fresh_rejected: list[str],
+    ) -> tuple[list[Any], list[str], list[str], list[str]]:
+        self._record_policy_failures(
+            policy_name=policy_name,
+            raw_prompts=fresh_prompts,
+            benchmark_ids=fresh_benchmarks,
+            chosen_texts=fresh_chosen,
+            rejected_texts=fresh_rejected,
+        )
+
+        requested_count = len(fresh_prompts)
+        if requested_count == 0 and self.config.algorithm.get("allow_buffer_only_updates", True):
+            requested_count = int(self.config.algorithm.get("buffer_only_update_batch_size", self.config.data.train_batch_size))
+        return self._sample_benchmark_replay_examples(policy_name, requested_count)
+
     def _update_benchmark_stats(self, benchmark_ids: list[str], a_rewards: torch.Tensor, b_rewards: torch.Tensor) -> dict[str, float]:
         metrics = {}
         a_rewards_np = a_rewards.cpu().numpy()
@@ -488,11 +609,16 @@ class RayCrossPlayTrainer(RaySPINTrainer):
             state["policy_a_wins"] += wins_a
             state["policy_b_wins"] += wins_b
             state["ties"] += ties
+            state["policy_a_reward_sum"] += float(a_subset.sum())
+            state["policy_b_reward_sum"] += float(b_subset.sum())
 
             metric_key = _sanitize_metric_key(benchmark_id)
+            metrics[f"bench/{metric_key}/policy_a_reward_mean"] = float(a_subset.mean())
+            metrics[f"bench/{metric_key}/policy_b_reward_mean"] = float(b_subset.mean())
             metrics[f"bench/{metric_key}/policy_a_win_rate"] = float(wins_a / len(indices))
             metrics[f"bench/{metric_key}/policy_b_win_rate"] = float(wins_b / len(indices))
             metrics[f"bench/{metric_key}/tie_rate"] = float(ties / len(indices))
+            metrics[f"bench/{metric_key}/reward_margin_mean"] = float((a_subset - b_subset).mean())
             metrics[f"bench/{metric_key}/count"] = float(state["count"])
         return metrics
 
@@ -648,7 +774,7 @@ class RayCrossPlayTrainer(RaySPINTrainer):
                         metrics["game/policy_b_exact_match_mean"] = float(np.mean(b_extras["exact_match"]))
 
                     for target_policy in self._update_targets_for_step():
-                        selected_prompts, selected_benchmarks, selected_chosen, selected_rejected = self._collect_policy_loss_examples(
+                        fresh_prompts, fresh_benchmarks, fresh_chosen, fresh_rejected = self._collect_policy_loss_examples(
                             target_policy=target_policy,
                             raw_prompts=raw_prompts,
                             benchmark_ids=benchmark_ids,
@@ -658,7 +784,18 @@ class RayCrossPlayTrainer(RaySPINTrainer):
                             b_rewards=b_rewards,
                         )
 
+                        metrics[f"{target_policy}/fresh_failed_examples"] = float(len(fresh_prompts))
+                        selected_prompts, selected_benchmarks, selected_chosen, selected_rejected = self._select_update_examples(
+                            policy_name=target_policy,
+                            fresh_prompts=fresh_prompts,
+                            fresh_benchmarks=fresh_benchmarks,
+                            fresh_chosen=fresh_chosen,
+                            fresh_rejected=fresh_rejected,
+                        )
                         metrics[f"{target_policy}/selected_examples"] = float(len(selected_prompts))
+                        metrics[f"{target_policy}/replay_buffer_examples"] = float(
+                            sum(len(items) for items in self.policy_failure_replay[target_policy].values())
+                        )
                         if selected_benchmarks:
                             bench_counts = defaultdict(int)
                             for benchmark_id in selected_benchmarks:
