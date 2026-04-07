@@ -9,7 +9,7 @@ from typing import Any
 
 import numpy as np
 import torch
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, open_dict
 from tqdm import tqdm
 
 from recipe.spin.spin_trainer import RaySPINTrainer, Role, _timer, compute_response_mask, reduce_metrics
@@ -40,6 +40,28 @@ class RayCrossPlayTrainer(RaySPINTrainer):
         self.replay_rng = np.random.default_rng(int(self.config.data.get("seed", 0)))
         self.anchor_a_wg = None
         self.anchor_b_wg = None
+
+    def _validate_config(self):
+        """Relax SPIN's global-GPU batch divisibility check for cross-play.
+
+        Cross-play runs one trainable policy per resource pool/GPU instead of a single
+        data-parallel policy replicated across all visible GPUs. Because of that,
+        requiring `real_train_batch_size % total_n_gpus == 0` is overly strict here
+        and incorrectly rejects otherwise valid configurations such as global batch 3
+        on a 2-policy duel. We temporarily validate the inherited SPIN constraints
+        under an effective single-GPU policy update assumption, then restore the
+        original trainer settings unchanged.
+        """
+        original_n_gpus_per_node = self.config.trainer.n_gpus_per_node
+        try:
+            OmegaConf.set_struct(self.config, False)
+            with open_dict(self.config):
+                self.config.trainer.n_gpus_per_node = 1
+            super()._validate_config()
+        finally:
+            OmegaConf.set_struct(self.config, False)
+            with open_dict(self.config):
+                self.config.trainer.n_gpus_per_node = original_n_gpus_per_node
 
     @staticmethod
     def _make_benchmark_state():

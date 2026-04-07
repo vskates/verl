@@ -92,9 +92,11 @@ class TaskRunner:
         OmegaConf.resolve(config)
 
         actor_local_path = copy_to_local(config.actor_rollout_ref.model.path)
+        tokenizer_source_path = config.actor_rollout_ref.model.get("tokenizer_path") or config.actor_rollout_ref.model.path
+        tokenizer_local_path = copy_to_local(tokenizer_source_path)
         trust_remote_code = config.data.get("trust_remote_code", False)
-        tokenizer = hf_tokenizer(actor_local_path, trust_remote_code=trust_remote_code)
-        processor = hf_processor(actor_local_path, use_fast=True)
+        tokenizer = hf_tokenizer(tokenizer_local_path, trust_remote_code=trust_remote_code)
+        processor = hf_processor(tokenizer_local_path, use_fast=True)
 
         role_worker_mapping = {
             Role.ActorRollout: ray.remote(RefPlayActorRolloutRefWorker),

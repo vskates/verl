@@ -71,7 +71,17 @@ class TaskRunner:
             Role.RefPolicy: ray.remote(CrossPlayActorRolloutRefWorker),
         }
 
-        if colocate_anchor_with_policy:
+        if config.trainer.n_gpus_per_node == 1:
+            resource_pool_spec = {
+                "crossplay_pool": [1] * config.trainer.nnodes,
+            }
+            mapping = {
+                Role.ActorRollout: "crossplay_pool",
+                Role.Rollout: "crossplay_pool",
+                Role.Actor: "crossplay_pool",
+                Role.RefPolicy: "crossplay_pool",
+            }
+        elif colocate_anchor_with_policy:
             resource_pool_spec = {
                 "policy_a_pool": [1] * config.trainer.nnodes,
                 "policy_b_pool": [1] * config.trainer.nnodes,
