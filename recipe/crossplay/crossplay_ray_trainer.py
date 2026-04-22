@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 from collections import defaultdict
 from copy import deepcopy
 from pprint import pprint
@@ -209,6 +210,20 @@ class RayCrossPlayTrainer(RaySPINTrainer):
         latest_file = os.path.join(self.config.trainer.default_local_dir, "latest_checkpointed_iteration.txt")
         with open(latest_file, "w") as f:
             f.write(str(self.global_steps))
+
+        if max_ckpt_to_keep is not None and max_ckpt_to_keep > 0:
+            checkpoint_dirs = []
+            for name in os.listdir(self.config.trainer.default_local_dir):
+                if not name.startswith("global_step_"):
+                    continue
+                step_str = name.removeprefix("global_step_")
+                if not step_str.isdigit():
+                    continue
+                checkpoint_dirs.append((int(step_str), os.path.join(self.config.trainer.default_local_dir, name)))
+            checkpoint_dirs.sort(key=lambda item: item[0])
+            while len(checkpoint_dirs) > max_ckpt_to_keep:
+                _, old_path = checkpoint_dirs.pop(0)
+                shutil.rmtree(old_path, ignore_errors=True)
 
     def _update_targets_for_step(self):
         mode = self.config.algorithm.get("update_mode", "both")
