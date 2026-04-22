@@ -9,7 +9,7 @@ defaults:
 actor_rollout_ref:
   hybrid_engine: true
   model:
-    path: Qwen/Qwen2.5-1.5B-Instruct
+    path: Qwen/Qwen2.5-0.5B-Instruct
     tokenizer_path: null
     trust_remote_code: false
     use_remove_padding: true
