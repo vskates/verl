@@ -9,7 +9,7 @@ defaults:
 actor_rollout_ref:
   hybrid_engine: true
   model:
-    path: Qwen/Qwen2.5-0.5B-Instruct
+    path: Qwen/Qwen2.5-1.5B-Instruct
     tokenizer_path: null
     trust_remote_code: false
     use_remove_padding: true
@@ -44,7 +44,7 @@ data:
 policy_b:
   hybrid_engine: true
   model:
-    path: HuggingFaceTB/SmolLM2-360M-Instruct
+    path: HuggingFaceTB/SmolLM2-1.7B-Instruct
     tokenizer_path: null
     trust_remote_code: false
     use_remove_padding: true
@@ -92,8 +92,10 @@ algorithm:
   use_reference_policy: true
   replay_buffer_size_per_benchmark: 64
   benchmark_replay_power: 1.5
+  benchmark_margin_power: 1.0
   allow_buffer_only_updates: true
   buffer_only_update_batch_size: ${data.train_batch_size}
+  include_fresh_failures_in_update: true
 
 trainer:
   project_name: verl_crossplay

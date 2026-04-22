@@ -493,15 +493,17 @@ class RayCrossPlayTrainer(RaySPINTrainer):
         policy_b_responses: list[str],
         a_rewards: torch.Tensor,
         b_rewards: torch.Tensor,
-    ) -> tuple[list[Any], list[str], list[str], list[str]]:
+    ) -> tuple[list[Any], list[str], list[str], list[str], list[float]]:
         if target_policy == "policy_a":
             loss_mask = b_rewards > a_rewards
             chosen_texts = policy_b_responses
             rejected_texts = policy_a_responses
+            margins = (b_rewards - a_rewards).cpu().tolist()
         else:
             loss_mask = a_rewards > b_rewards
             chosen_texts = policy_a_responses
             rejected_texts = policy_b_responses
+            margins = (a_rewards - b_rewards).cpu().tolist()
 
         if not self.config.algorithm.get("focus_failed_examples_only", True):
             loss_mask = torch.ones_like(loss_mask, dtype=torch.bool)
@@ -510,6 +512,7 @@ class RayCrossPlayTrainer(RaySPINTrainer):
         selected_benchmarks = []
         selected_chosen = []
         selected_rejected = []
+        selected_margins = []
         for idx, is_selected in enumerate(loss_mask.tolist()):
             if not is_selected:
                 continue
@@ -517,7 +520,8 @@ class RayCrossPlayTrainer(RaySPINTrainer):
             selected_benchmarks.append(benchmark_ids[idx])
             selected_chosen.append(chosen_texts[idx])
             selected_rejected.append(rejected_texts[idx])
-        return selected_prompts, selected_benchmarks, selected_chosen, selected_rejected
+            selected_margins.append(float(margins[idx]))
+        return selected_prompts, selected_benchmarks, selected_chosen, selected_rejected, selected_margins
 
     def _record_policy_failures(
         self,
@@ -527,11 +531,12 @@ class RayCrossPlayTrainer(RaySPINTrainer):
         benchmark_ids: list[str],
         chosen_texts: list[str],
         rejected_texts: list[str],
+        margins: list[float],
     ) -> None:
         max_per_benchmark = int(self.config.algorithm.get("replay_buffer_size_per_benchmark", 64))
         replay_store = self.policy_failure_replay[policy_name]
-        for raw_prompt, benchmark_id, chosen_text, rejected_text in zip(
-            raw_prompts, benchmark_ids, chosen_texts, rejected_texts, strict=True
+        for raw_prompt, benchmark_id, chosen_text, rejected_text, margin in zip(
+            raw_prompts, benchmark_ids, chosen_texts, rejected_texts, margins, strict=True
         ):
             replay_store[benchmark_id].append(
                 {
@@ -539,6 +544,7 @@ class RayCrossPlayTrainer(RaySPINTrainer):
                     "benchmark_id": benchmark_id,
                     "chosen_text": chosen_text,
                     "rejected_text": rejected_text,
+                    "margin": float(max(margin, 0.0)),
                 }
             )
             if len(replay_store[benchmark_id]) > max_per_benchmark:
@@ -561,11 +567,11 @@ class RayCrossPlayTrainer(RaySPINTrainer):
         reward_deficit = max(reward_gap, 0.0)
         return 1.0 + deficit + reward_deficit
 
-    def _sample_benchmark_replay_examples(self, policy_name: str, requested_count: int) -> tuple[list[Any], list[str], list[str], list[str]]:
+    def _sample_benchmark_replay_examples(self, policy_name: str, requested_count: int) -> tuple[list[Any], list[str], list[str], list[str], list[float]]:
         replay_store = self.policy_failure_replay[policy_name]
         available = {benchmark_id: items for benchmark_id, items in replay_store.items() if items}
         if requested_count <= 0 or not available:
-            return [], [], [], []
+            return [], [], [], [], []
 
         benchmark_ids = list(available.keys())
         priorities = np.asarray(
@@ -580,15 +586,28 @@ class RayCrossPlayTrainer(RaySPINTrainer):
         selected_benchmarks = []
         chosen = []
         rejected = []
+        margins = []
+        margin_power = float(self.config.algorithm.get("benchmark_margin_power", 1.0))
         for _ in range(requested_count):
             benchmark_idx = int(self.replay_rng.choice(len(benchmark_ids), p=probabilities))
             benchmark_id = benchmark_ids[benchmark_idx]
-            sample = available[benchmark_id][int(self.replay_rng.integers(len(available[benchmark_id])))]
+            candidate_items = available[benchmark_id]
+            if len(candidate_items) == 1:
+                sample = candidate_items[0]
+            else:
+                candidate_weights = np.asarray(
+                    [1.0 + max(float(item.get("margin", 0.0)), 0.0) for item in candidate_items],
+                    dtype=np.float64,
+                )
+                candidate_weights = np.power(candidate_weights, margin_power)
+                candidate_weights = candidate_weights / candidate_weights.sum()
+                sample = candidate_items[int(self.replay_rng.choice(len(candidate_items), p=candidate_weights))]
             prompts.append(deepcopy(sample["raw_prompt"]))
             selected_benchmarks.append(sample["benchmark_id"])
             chosen.append(sample["chosen_text"])
             rejected.append(sample["rejected_text"])
-        return prompts, selected_benchmarks, chosen, rejected
+            margins.append(float(sample.get("margin", 0.0)))
+        return prompts, selected_benchmarks, chosen, rejected, margins
 
     def _select_update_examples(
         self,
@@ -598,14 +617,19 @@ class RayCrossPlayTrainer(RaySPINTrainer):
         fresh_benchmarks: list[str],
         fresh_chosen: list[str],
         fresh_rejected: list[str],
-    ) -> tuple[list[Any], list[str], list[str], list[str]]:
+        fresh_margins: list[float],
+    ) -> tuple[list[Any], list[str], list[str], list[str], list[float]]:
         self._record_policy_failures(
             policy_name=policy_name,
             raw_prompts=fresh_prompts,
             benchmark_ids=fresh_benchmarks,
             chosen_texts=fresh_chosen,
             rejected_texts=fresh_rejected,
+            margins=fresh_margins,
         )
+
+        if self.config.algorithm.get("include_fresh_failures_in_update", True) and fresh_prompts:
+            return fresh_prompts, fresh_benchmarks, fresh_chosen, fresh_rejected, fresh_margins
 
         requested_count = len(fresh_prompts)
         if requested_count == 0 and self.config.algorithm.get("allow_buffer_only_updates", True):
@@ -796,7 +820,7 @@ class RayCrossPlayTrainer(RaySPINTrainer):
                         metrics["game/policy_b_exact_match_mean"] = float(np.mean(b_extras["exact_match"]))
 
                     for target_policy in self._update_targets_for_step():
-                        fresh_prompts, fresh_benchmarks, fresh_chosen, fresh_rejected = self._collect_policy_loss_examples(
+                        fresh_prompts, fresh_benchmarks, fresh_chosen, fresh_rejected, fresh_margins = self._collect_policy_loss_examples(
                             target_policy=target_policy,
                             raw_prompts=raw_prompts,
                             benchmark_ids=benchmark_ids,
@@ -807,14 +831,19 @@ class RayCrossPlayTrainer(RaySPINTrainer):
                         )
 
                         metrics[f"{target_policy}/fresh_failed_examples"] = float(len(fresh_prompts))
-                        selected_prompts, selected_benchmarks, selected_chosen, selected_rejected = self._select_update_examples(
+                        if fresh_margins:
+                            metrics[f"{target_policy}/fresh_reward_margin_mean"] = float(np.mean(fresh_margins))
+                        selected_prompts, selected_benchmarks, selected_chosen, selected_rejected, selected_margins = self._select_update_examples(
                             policy_name=target_policy,
                             fresh_prompts=fresh_prompts,
                             fresh_benchmarks=fresh_benchmarks,
                             fresh_chosen=fresh_chosen,
                             fresh_rejected=fresh_rejected,
+                            fresh_margins=fresh_margins,
                         )
                         metrics[f"{target_policy}/selected_examples"] = float(len(selected_prompts))
+                        if selected_margins:
+                            metrics[f"{target_policy}/selected_reward_margin_mean"] = float(np.mean(selected_margins))
                         metrics[f"{target_policy}/replay_buffer_examples"] = float(
                             sum(len(items) for items in self.policy_failure_replay[target_policy].values())
                         )

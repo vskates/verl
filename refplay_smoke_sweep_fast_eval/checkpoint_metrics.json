@@ -1,0 +1,32 @@
+[
+  {
+    "checkpoint": "global_step_1",
+    "step": 1,
+    "actor_reward_mean": 0.0,
+    "reference_reward_mean": 0.0,
+    "actor_win_rate": 0.0,
+    "reference_win_rate": 0.0,
+    "tie_rate": 1.0,
+    "num_examples": 128
+  },
+  {
+    "checkpoint": "global_step_2",
+    "step": 2,
+    "actor_reward_mean": 0.0,
+    "reference_reward_mean": 0.0,
+    "actor_win_rate": 0.0,
+    "reference_win_rate": 0.0,
+    "tie_rate": 1.0,
+    "num_examples": 128
+  },
+  {
+    "checkpoint": "global_step_3",
+    "step": 3,
+    "actor_reward_mean": 0.0,
+    "reference_reward_mean": 0.0,
+    "actor_win_rate": 0.0,
+    "reference_win_rate": 0.0,
+    "tie_rate": 1.0,
+    "num_examples": 128
+  }
+]
