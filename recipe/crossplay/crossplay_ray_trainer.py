@@ -192,8 +192,22 @@ class RayCrossPlayTrainer(RaySPINTrainer):
         return self.global_steps
 
     def _save_checkpoint(self):
-        local_global_step_folder = os.path.join(self.config.trainer.default_local_dir, f"global_step_{self.global_steps}")
         max_ckpt_to_keep = self.config.trainer.get("max_actor_ckpt_to_keep", None)
+        if max_ckpt_to_keep is not None and max_ckpt_to_keep > 0:
+            checkpoint_dirs = []
+            for name in os.listdir(self.config.trainer.default_local_dir):
+                if not name.startswith("global_step_"):
+                    continue
+                step_str = name.removeprefix("global_step_")
+                if not step_str.isdigit():
+                    continue
+                checkpoint_dirs.append((int(step_str), os.path.join(self.config.trainer.default_local_dir, name)))
+            checkpoint_dirs.sort(key=lambda item: item[0])
+            while len(checkpoint_dirs) >= max_ckpt_to_keep:
+                _, old_path = checkpoint_dirs.pop(0)
+                shutil.rmtree(old_path, ignore_errors=True)
+
+        local_global_step_folder = os.path.join(self.config.trainer.default_local_dir, f"global_step_{self.global_steps}")
         self.policy_a_wg.save_checkpoint(os.path.join(local_global_step_folder, "policy_a"), None, self.global_steps, max_ckpt_to_keep=max_ckpt_to_keep)
         self.policy_b_wg.save_checkpoint(os.path.join(local_global_step_folder, "policy_b"), None, self.global_steps, max_ckpt_to_keep=max_ckpt_to_keep)
 
