@@ -192,6 +192,8 @@ class RayCrossPlayTrainer(RaySPINTrainer):
         return self.global_steps
 
     def _save_checkpoint(self):
+        os.makedirs(self.config.trainer.default_local_dir, exist_ok=True)
+
         max_ckpt_to_keep = self.config.trainer.get("max_actor_ckpt_to_keep", None)
         if max_ckpt_to_keep is not None and max_ckpt_to_keep > 0:
             checkpoint_dirs = []
