@@ -168,7 +168,9 @@ class RefPlayActorRolloutRefWorker(ActorRolloutRefWorker):
                 return result
             return self.rollout, getattr(self, "rollout_sharding_manager", self.ulysses_sharding_manager)
 
-        self._register_dispatch_collect_info("rollout", dp_rank=self.rank, is_collect=True)
+        register_collect = getattr(self, "_register_dispatch_collect_info", None)
+        if callable(register_collect):
+            register_collect("rollout", dp_rank=self.rank, is_collect=True)
         self.rollout_device_mesh = self.device_mesh
         self.rollout = _LegacyHFRollout(module=self.actor_module_fsdp, config=self.config.rollout)
         self.base_sync_done = True

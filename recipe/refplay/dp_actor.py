@@ -81,16 +81,22 @@ class RefPlayDataParallelPPOActor(DataParallelPPOActor):
             if calculate_entropy and entropy_lst:
                 entropys = torch.concat(entropy_lst, dim=0)[revert_indices]
 
-        outputs = {"log_probs": log_probs}
+        entropys = None
         if calculate_entropy:
             if not entropy_lst:
                 entropys = torch.zeros_like(log_probs)
             elif not use_dynamic_bsz:
                 entropys = torch.concat(entropy_lst, dim=0)
+
+        if calculate_entropy and not calculate_sum_pi_squared:
+            return log_probs, entropys
+
+        outputs = {"log_probs": log_probs}
+        if entropys is not None:
             outputs["entropys"] = entropys
         if calculate_sum_pi_squared:
             outputs["sum_pi_squared"] = torch.zeros_like(log_probs)
-        return outputs
+        return outputs if outputs.keys() != {"log_probs"} else log_probs
 
     def update_policy_dpo_with_ref(self, data: DataProto):
         self.actor_module.train()

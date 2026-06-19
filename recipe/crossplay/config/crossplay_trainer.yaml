@@ -40,6 +40,8 @@ policy_a:
 
 data:
   seed: 42
+  max_response_length: 128
+  gsm8k_answer_instruction: "Please reason step by step, and put the final numeric answer on the last line as: #### <answer>"
 
 policy_b:
   hybrid_engine: true
@@ -87,7 +89,7 @@ algorithm:
   dpo_label_smoothing: 0.0
   update_mode: both
   update_on_ties: false
-  focus_failed_examples_only: true
+  focus_failed_examples_only: false
   benchmark_field: data_source
   use_reference_policy: true
   replay_buffer_size_per_benchmark: 64
@@ -111,4 +113,12 @@ evaluation:
 
 reward:
   reward_manager:
-    name: crossplay_gsm8k_rule
+    name: crossplay_gsm8k_dense
+    correct_reward: 1.0
+    incorrect_reward: 0.05
+    no_answer_reward: 0.0
+    format_bonus: 0.02
+    answer_bonus: 0.03
+    proximity_bonus: 0.20
+    max_incorrect_reward: 0.30
+    allow_fallback_answer: true
