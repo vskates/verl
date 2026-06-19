@@ -38,6 +38,10 @@ class RayCrossPlayTrainer(RaySPINTrainer):
             "policy_a": defaultdict(list),
             "policy_b": defaultdict(list),
         }
+        self.policy_training_stats = {
+            "policy_a": defaultdict(int),
+            "policy_b": defaultdict(int),
+        }
         self.replay_rng = np.random.default_rng(int(self.config.data.get("seed", 0)))
         self.anchor_a_wg = None
         self.anchor_b_wg = None
@@ -171,6 +175,9 @@ class RayCrossPlayTrainer(RaySPINTrainer):
             else:
                 wg.load_checkpoint(checkpoints[name], del_local_after_load=self.config.trainer.del_local_ckpt_after_load)
 
+        if resume_weights_only:
+            return self.global_steps
+
         trainer_state_path = os.path.join(global_step_folder, "trainer_state.pt")
         if os.path.exists(trainer_state_path):
             trainer_state = torch.load(trainer_state_path, weights_only=False)
@@ -188,6 +195,12 @@ class RayCrossPlayTrainer(RaySPINTrainer):
                 self.policy_failure_replay = {
                     "policy_a": defaultdict(list, failure_replay.get("policy_a", {})),
                     "policy_b": defaultdict(list, failure_replay.get("policy_b", {})),
+                }
+            policy_training_stats = trainer_state.get("policy_training_stats")
+            if policy_training_stats is not None:
+                self.policy_training_stats = {
+                    "policy_a": defaultdict(int, policy_training_stats.get("policy_a", {})),
+                    "policy_b": defaultdict(int, policy_training_stats.get("policy_b", {})),
                 }
         return self.global_steps
 
@@ -219,6 +232,10 @@ class RayCrossPlayTrainer(RaySPINTrainer):
             "policy_failure_replay": {
                 "policy_a": dict(self.policy_failure_replay["policy_a"]),
                 "policy_b": dict(self.policy_failure_replay["policy_b"]),
+            },
+            "policy_training_stats": {
+                "policy_a": dict(self.policy_training_stats["policy_a"]),
+                "policy_b": dict(self.policy_training_stats["policy_b"]),
             },
         }
         torch.save(trainer_state, os.path.join(local_global_step_folder, "trainer_state.pt"))
@@ -297,20 +314,43 @@ class RayCrossPlayTrainer(RaySPINTrainer):
     def _extract_reward_entries(self, batch: DataProto, key: str) -> list[Any]:
         return self._to_python_list(batch.non_tensor_batch.get(key), batch.batch.batch_size[0])
 
-    def _serialize_prompt(self, tokenizer, raw_prompt: Any) -> str:
+    def _augment_prompt_for_benchmark(self, chat: list[dict[str, Any]], benchmark_id: str | None) -> list[dict[str, Any]]:
+        if not benchmark_id or "gsm8k" not in benchmark_id.lower():
+            return chat
+        instruction = self.config.data.get(
+            "gsm8k_answer_instruction",
+            "Please reason step by step, and put the final numeric answer on the last line as: #### <answer>",
+        )
+        if not instruction:
+            return chat
+
+        augmented_chat = [dict(message) for message in chat]
+        for message in reversed(augmented_chat):
+            if message.get("role") == "user":
+                content = message.get("content", "")
+                if isinstance(content, str) and instruction not in content:
+                    message["content"] = f"{content.rstrip()}\n\n{instruction}"
+                return augmented_chat
+
+        augmented_chat.append({"role": "user", "content": instruction})
+        return augmented_chat
+
+    def _serialize_prompt(self, tokenizer, raw_prompt: Any, benchmark_id: str | None = None) -> str:
         chat = raw_prompt if isinstance(raw_prompt, list) else raw_prompt.tolist()
+        chat = self._augment_prompt_for_benchmark(chat, benchmark_id)
         return tokenizer.apply_chat_template(chat, add_generation_prompt=True, tokenize=False)
 
     def _build_policy_generation_batch(self, batch: DataProto, policy_name: str, validate: bool = False) -> DataProto:
         tokenizer = self.policy_tokenizers[policy_name]
         raw_prompts = self._extract_raw_prompts(batch)
+        benchmark_ids = self._extract_benchmark_ids(batch)
         pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
 
         input_ids_rows = []
         attention_mask_rows = []
         max_prompt_length = self.config.data.max_prompt_length
-        for raw_prompt in raw_prompts:
-            prompt_text = self._serialize_prompt(tokenizer, raw_prompt)
+        for raw_prompt, benchmark_id in zip(raw_prompts, benchmark_ids, strict=True):
+            prompt_text = self._serialize_prompt(tokenizer, raw_prompt, benchmark_id=benchmark_id)
             encoded = tokenizer(prompt_text, return_tensors="pt", add_special_tokens=False)
             input_ids = encoded["input_ids"][0]
             attention_mask = encoded["attention_mask"][0]
@@ -524,35 +564,74 @@ class RayCrossPlayTrainer(RaySPINTrainer):
         policy_b_responses: list[str],
         a_rewards: torch.Tensor,
         b_rewards: torch.Tensor,
-    ) -> tuple[list[Any], list[str], list[str], list[str], list[float]]:
-        if target_policy == "policy_a":
-            loss_mask = b_rewards > a_rewards
-            chosen_texts = policy_b_responses
-            rejected_texts = policy_a_responses
-            margins = (b_rewards - a_rewards).cpu().tolist()
-        else:
-            loss_mask = a_rewards > b_rewards
-            chosen_texts = policy_a_responses
-            rejected_texts = policy_b_responses
-            margins = (a_rewards - b_rewards).cpu().tolist()
+    ) -> tuple[list[Any], list[str], list[str], list[str], list[float], dict[str, float]]:
+        a_wins = a_rewards > b_rewards
+        b_wins = b_rewards > a_rewards
+        ties = a_rewards == b_rewards
 
-        if not self.config.algorithm.get("focus_failed_examples_only", True):
-            loss_mask = torch.ones_like(loss_mask, dtype=torch.bool)
+        if target_policy == "policy_a":
+            loss_mask = b_wins
+            win_mask = a_wins
+        else:
+            loss_mask = a_wins
+            win_mask = b_wins
+
+        focus_failed_only = bool(self.config.algorithm.get("focus_failed_examples_only", True))
+        if focus_failed_only:
+            select_mask = loss_mask
+        else:
+            # In all-pairs mode, train on every decisive pair for both policies.
+            # Ties are excluded because the current hard DPO update needs a winner/rejected order.
+            select_mask = win_mask | loss_mask
 
         selected_prompts = []
         selected_benchmarks = []
         selected_chosen = []
         selected_rejected = []
         selected_margins = []
-        for idx, is_selected in enumerate(loss_mask.tolist()):
+        reward_diffs = (a_rewards - b_rewards).cpu().tolist()
+        for idx, is_selected in enumerate(select_mask.tolist()):
             if not is_selected:
                 continue
             selected_prompts.append(raw_prompts[idx])
             selected_benchmarks.append(benchmark_ids[idx])
-            selected_chosen.append(chosen_texts[idx])
-            selected_rejected.append(rejected_texts[idx])
-            selected_margins.append(float(margins[idx]))
-        return selected_prompts, selected_benchmarks, selected_chosen, selected_rejected, selected_margins
+            diff = float(reward_diffs[idx])
+            if diff > 0:
+                selected_chosen.append(policy_a_responses[idx])
+                selected_rejected.append(policy_b_responses[idx])
+                selected_margins.append(diff)
+            else:
+                selected_chosen.append(policy_b_responses[idx])
+                selected_rejected.append(policy_a_responses[idx])
+                selected_margins.append(abs(diff))
+        summary = {
+            "fresh_examples": float(int(select_mask.sum().item())),
+            "fresh_failed_examples": float(int(loss_mask.sum().item())),
+            "fresh_win_examples": float(int(win_mask.sum().item())),
+            "fresh_tie_examples": float(int(ties.sum().item())),
+        }
+        return selected_prompts, selected_benchmarks, selected_chosen, selected_rejected, selected_margins, summary
+
+    def _record_policy_training_stat(self, policy_name: str, key: str, value: int) -> None:
+        self.policy_training_stats[policy_name][key] += int(value)
+
+    def _policy_training_metrics(self, policy_name: str) -> dict[str, float]:
+        stats = self.policy_training_stats[policy_name]
+        return {
+            f"{policy_name}/total_replay_examples_recorded": float(stats.get("replay_examples_recorded", 0)),
+            f"{policy_name}/total_selected_dpo_pairs": float(stats.get("selected_dpo_pairs", 0)),
+            f"{policy_name}/total_update_steps": float(stats.get("update_steps", 0)),
+            f"{policy_name}/total_skipped_steps": float(stats.get("skipped_steps", 0)),
+        }
+
+    def _balance_metrics(self) -> dict[str, float]:
+        a_stats = self.policy_training_stats["policy_a"]
+        b_stats = self.policy_training_stats["policy_b"]
+        return {
+            "balance/replay_examples_recorded_diff": float(a_stats.get("replay_examples_recorded", 0) - b_stats.get("replay_examples_recorded", 0)),
+            "balance/selected_dpo_pairs_diff": float(a_stats.get("selected_dpo_pairs", 0) - b_stats.get("selected_dpo_pairs", 0)),
+            "balance/update_steps_diff": float(a_stats.get("update_steps", 0) - b_stats.get("update_steps", 0)),
+        }
 
     def _record_policy_failures(
         self,
@@ -851,7 +930,7 @@ class RayCrossPlayTrainer(RaySPINTrainer):
                         metrics["game/policy_b_exact_match_mean"] = float(np.mean(b_extras["exact_match"]))
 
                     for target_policy in self._update_targets_for_step():
-                        fresh_prompts, fresh_benchmarks, fresh_chosen, fresh_rejected, fresh_margins = self._collect_policy_loss_examples(
+                        fresh_prompts, fresh_benchmarks, fresh_chosen, fresh_rejected, fresh_margins, outcome_summary = self._collect_policy_loss_examples(
                             target_policy=target_policy,
                             raw_prompts=raw_prompts,
                             benchmark_ids=benchmark_ids,
@@ -861,7 +940,10 @@ class RayCrossPlayTrainer(RaySPINTrainer):
                             b_rewards=b_rewards,
                         )
 
-                        metrics[f"{target_policy}/fresh_failed_examples"] = float(len(fresh_prompts))
+                        metrics[f"{target_policy}/fresh_examples"] = outcome_summary["fresh_examples"]
+                        metrics[f"{target_policy}/fresh_failed_examples"] = outcome_summary["fresh_failed_examples"]
+                        metrics[f"{target_policy}/fresh_win_examples"] = outcome_summary["fresh_win_examples"]
+                        metrics[f"{target_policy}/fresh_tie_examples"] = outcome_summary["fresh_tie_examples"]
                         if fresh_margins:
                             metrics[f"{target_policy}/fresh_reward_margin_mean"] = float(np.mean(fresh_margins))
                         selected_prompts, selected_benchmarks, selected_chosen, selected_rejected, selected_margins = self._select_update_examples(
@@ -872,6 +954,8 @@ class RayCrossPlayTrainer(RaySPINTrainer):
                             fresh_rejected=fresh_rejected,
                             fresh_margins=fresh_margins,
                         )
+                        self._record_policy_training_stat(target_policy, "replay_examples_recorded", len(fresh_prompts))
+                        self._record_policy_training_stat(target_policy, "selected_dpo_pairs", len(selected_prompts))
                         metrics[f"{target_policy}/selected_examples"] = float(len(selected_prompts))
                         if selected_margins:
                             metrics[f"{target_policy}/selected_reward_margin_mean"] = float(np.mean(selected_margins))
@@ -887,6 +971,8 @@ class RayCrossPlayTrainer(RaySPINTrainer):
 
                         if not selected_prompts:
                             metrics[f"{target_policy}/update_skipped"] = 1.0
+                            self._record_policy_training_stat(target_policy, "skipped_steps", 1)
+                            metrics.update(self._policy_training_metrics(target_policy))
                             continue
 
                         update_batch = self._build_policy_update_batch(
@@ -897,6 +983,8 @@ class RayCrossPlayTrainer(RaySPINTrainer):
                         )
                         if update_batch is None:
                             metrics[f"{target_policy}/update_skipped"] = 1.0
+                            self._record_policy_training_stat(target_policy, "skipped_steps", 1)
+                            metrics.update(self._policy_training_metrics(target_policy))
                             continue
 
                         with _timer(f"update_{target_policy}", timing_raw):
@@ -904,7 +992,11 @@ class RayCrossPlayTrainer(RaySPINTrainer):
                                 output = self.policy_a_wg.update_actor_dpo(update_batch)
                             else:
                                 output = self.policy_b_wg.update_actor_dpo(update_batch)
+                        self._record_policy_training_stat(target_policy, "update_steps", 1)
                         metrics.update(self._prefix_metrics(reduce_metrics(output.meta_info["metrics"]), target_policy))
+                        metrics.update(self._policy_training_metrics(target_policy))
+
+                    metrics.update(self._balance_metrics())
 
                 if self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
                     with _timer("testing", timing_raw):

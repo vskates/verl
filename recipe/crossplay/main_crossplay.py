@@ -48,7 +48,7 @@ class TaskRunner:
         from verl.utils.fs import copy_to_local
 
         from .crossplay_worker import CrossPlayActorRolloutRefWorker
-        from .text_judges import CallableTextJudge, RuleBasedGSM8KTextJudge
+        from .text_judges import CallableTextJudge, DenseGSM8KTextJudge, RuleBasedGSM8KTextJudge
 
         pprint(OmegaConf.to_container(config, resolve=True))
         OmegaConf.resolve(config)
@@ -108,6 +108,7 @@ class TaskRunner:
 
         reward_manager_name = None
         reward_cfg = config.get("reward")
+        reward_manager_cfg = None
         if reward_cfg is not None:
             reward_manager_cfg = reward_cfg.get("reward_manager")
             if isinstance(reward_manager_cfg, str):
@@ -115,9 +116,31 @@ class TaskRunner:
             elif reward_manager_cfg is not None and reward_manager_cfg.get("name") is not None:
                 reward_manager_name = reward_manager_cfg.name
 
-        reward_manager_name = reward_manager_name or "crossplay_gsm8k_rule"
+        reward_manager_name = reward_manager_name or "crossplay_gsm8k_dense"
+
+        def _reward_arg(name: str, default):
+            if reward_manager_cfg is None or isinstance(reward_manager_cfg, str):
+                return default
+            value = reward_manager_cfg.get(name)
+            return default if value is None else value
+
         if reward_manager_name in {"crossplay_gsm8k_rule", "refplay_gsm8k_rule"}:
-            judge = RuleBasedGSM8KTextJudge()
+            judge = RuleBasedGSM8KTextJudge(
+                correct_reward=float(_reward_arg("correct_reward", 1.0)),
+                incorrect_reward=float(_reward_arg("incorrect_reward", 0.1)),
+                no_answer_reward=float(_reward_arg("no_answer_reward", 0.0)),
+            )
+        elif reward_manager_name in {"crossplay_gsm8k_dense", "refplay_gsm8k_dense"}:
+            judge = DenseGSM8KTextJudge(
+                correct_reward=float(_reward_arg("correct_reward", 1.0)),
+                incorrect_reward=float(_reward_arg("incorrect_reward", 0.05)),
+                no_answer_reward=float(_reward_arg("no_answer_reward", 0.0)),
+                format_bonus=float(_reward_arg("format_bonus", 0.02)),
+                answer_bonus=float(_reward_arg("answer_bonus", 0.03)),
+                proximity_bonus=float(_reward_arg("proximity_bonus", 0.20)),
+                max_incorrect_reward=float(_reward_arg("max_incorrect_reward", 0.30)),
+                allow_fallback_answer=bool(_reward_arg("allow_fallback_answer", True)),
+            )
         else:
             custom_fn = get_custom_reward_fn(config)
             if custom_fn is None:

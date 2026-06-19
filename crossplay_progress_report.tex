@@ -1,0 +1,523 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{iftex}
+\ifPDFTeX
+  \usepackage[T2A]{fontenc}
+  \usepackage[utf8]{inputenc}
+  \usepackage[russian,english]{babel}
+\else
+  \usepackage{fontspec}
+  \usepackage{polyglossia}
+  \setdefaultlanguage{russian}
+  \setotherlanguage{english}
+  \setmainfont{DejaVu Serif}
+  \setsansfont{DejaVu Sans}
+  \setmonofont{DejaVu Sans Mono}
+\fi
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!50!black,
+  urlcolor=blue!60!black,
+  citecolor=blue!50!black
+}
+
+\title{Промежуточный прогресс по Multi-Agent Nash Learning from HF:\\
+теория, реализация в VERL, эксперименты и дальнейший план}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Постановка задачи}
+
+Проект находится на пересечении \textit{preference learning}, \textit{game dynamics} и \textit{multi-agent LLM training}. Базовая мотивация идёт от статьи \textit{Nash Learning from Human Feedback}~\cite{nlhf}, где предлагается вместо явной reward-модели работать с более общей моделью предпочтений. Это важно, потому что человеческие предпочтения в общем случае могут быть \textbf{нетранзитивны}: может выполняться
+\[
+A \succ B, \qquad B \succ C, \qquad C \succ A.
+\]
+В таком случае сведение качества ответа к одной скалярной награде может быть слишком грубым или даже концептуально неверным.
+
+Основная идея проекта состоит в том, чтобы перейти от постановки ``модель играет против прошлых версий себя'' к постановке, где:
+\begin{enumerate}[label=\arabic*.]
+  \item либо играют \textbf{две разные модели} с разными pretrain / tokenizer / inductive bias;
+  \item либо играют \textbf{две версии одной и той же базы}, но обученные на разных задачах и потому обладающие разными навыками.
+\end{enumerate}
+
+Цель --- понять, можно ли получить более интересную и потенциально более устойчивую динамику обучения, чем в обычном RLHF, если обучать модели в игровом фреймворке и обновлять их на основе попарных сравнений ответов.
+
+\section{Почему обычного RLHF недостаточно}
+
+Классический RLHF обычно записывается как задача
+\[
+\max_{\pi_\theta}
+\;
+\mathbb{E}_{x \sim \mathcal D,\; y \sim \pi_\theta(\cdot \mid x)}
+\bigl[r_\phi(x,y)\bigr]
+- \beta \, \mathrm{KL}(\pi_\theta \,\|\, \pi_{\mathrm{ref}}),
+\]
+где:
+\begin{itemize}
+  \item $x$ --- prompt;
+  \item $y$ --- ответ модели;
+  \item $r_\phi(x,y)$ --- reward model;
+  \item $\pi_{\mathrm{ref}}$ --- reference policy;
+  \item $\beta$ --- коэффициент регуляризации.
+\end{itemize}
+
+Такая формулировка предполагает, что качество ответа можно описать единственным числом $r_\phi(x,y)$. Однако в задачах с человеческими предпочтениями естественнее иметь объект вида
+\[
+P_\phi(y_a \succ y_b \mid x),
+\]
+то есть вероятность того, что при prompt $x$ ответ $y_a$ предпочтительнее ответа $y_b$.
+
+Если бы существовала ``истинная'' reward-функция, то часто можно было бы писать
+\[
+P(y_a \succ y_b \mid x) \approx \sigma\bigl(r(x,y_a)-r(x,y_b)\bigr),
+\]
+но в общем случае pairwise preference может быть богаче, чем любая одна скалярная reward-функция. Именно здесь появляется мотивация для \textit{Nash-style} постановки: искать не модель с максимальным reward в вакууме, а стратегию, устойчивую к другим стратегиям.
+
+\section{Интуиция Nash-постановки}
+
+Если рассматривать две политики $\pi_A$ и $\pi_B$ как игроков, то естественно ввести utility-функцию $u(\pi_A,\pi_B)$, описывающую, насколько хорошо играет $A$ против $B$. Тогда в двухигроковой постановке равновесие Нэша $(\pi_A^\star,\pi_B^\star)$ удовлетворяет
+\[
+u(\pi_A^\star,\pi_B^\star) \ge u(\pi_A,\pi_B^\star)
+\quad \forall \pi_A,
+\]
+\[
+u(\pi_A^\star,\pi_B^\star) \le u(\pi_A^\star,\pi_B)
+\quad \forall \pi_B.
+\]
+
+Даже если текущая реализация не является строгой нулевой суммой и не даёт формального доказательства достижения равновесия Нэша, сама идея проекта уже строится в правильном направлении: \textbf{оценивать качество модели через игру с альтернативными стратегиями, а не только через скалярный reward}.
+
+\section{Два предполагаемых исследовательских сетапа}
+
+\subsection{Сетап 1: разные производители, разные модели}
+
+В первом сетапе играют две модели разных семейств, например:
+\begin{itemize}
+  \item \texttt{Llama} против \texttt{Qwen};
+  \item или, как в текущем эксперименте, \texttt{Qwen} против \texttt{SmolLM}.
+\end{itemize}
+
+Гипотеза здесь такая: разные модели обладают разными знаниями, разными токенизаторами, разными inductive bias и потому будут систематически выигрывать на разных подмножествах задач. Если затем обновлять каждую модель на тех задачах, где она проиграла сопернику, можно получить targeted improvement на собственных слабых местах.
+
+\subsection{Сетап 2: одна база, разные специализации}
+
+Во втором сетапе рассматриваются две версии одной и той же базовой модели, но затюненные на разные типы задач. Например:
+\begin{itemize}
+  \item одна лучше в math;
+  \item другая лучше в code;
+  \item или одна сильнее в reasoning, а другая --- в instruction-following.
+\end{itemize}
+
+Гипотеза: через игровую динамику такие модели могут частично перенять навыки друг друга. Это потенциально интереснее с научной точки зрения, чем первый сетап, потому что здесь меньше архитектурного шума: модели одной семьи проще сравнивать и проще интерпретировать возникающую динамику как эффект preference/game learning, а не как побочный эффект разных backbone.
+
+\section{Роль VERL в этом проекте}
+
+В данном проекте \texttt{VERL} играет роль не отдельного алгоритма, а \textbf{исследовательской инфраструктуры}. Он даёт:
+\begin{itemize}
+  \item распределённую архитектуру через \texttt{Ray};
+  \item абстракцию \texttt{DataProto} для данных и meta-information;
+  \item роли \texttt{Actor}, \texttt{Rollout}, \texttt{RefPolicy};
+  \item FSDP и related distributed training mechanics;
+  \item recipe-уровень для быстрого прототипирования новых training loops.
+\end{itemize}
+
+С инженерной точки зрения задача проекта не сводится к написанию одного loss. Нужно уметь:
+\begin{itemize}
+  \item генерировать ответы несколькими политиками;
+  \item сравнивать их через внешний judge;
+  \item собирать pairwise update data;
+  \item считать reference log-probabilities;
+  \item сохранять и восстанавливать checkpoint'ы;
+  \item валидировать начальные и обученные веса в нескольких матчапах.
+\end{itemize}
+
+Именно поэтому построение working recipe в \texttt{VERL} само по себе уже является существенным исследовательским прогрессом.
+
+\section{Архитектура репозитория по смыслу}
+
+На содержательном уровне текущий код разбивается на следующие слои:
+\begin{itemize}
+  \item \texttt{recipe/spin} --- базовый online-DPO/self-play стек;
+  \item \texttt{recipe/refplay} --- более прикладной стек обучения от сравнений ответов;
+  \item \texttt{recipe/nlhf} --- baseline, близкий к исходной статье \textit{Nash Learning from Human Feedback};
+  \item \texttt{recipe/crossplay} --- новый рецепт для конкурентного обучения двух разных живых моделей.
+\end{itemize}
+
+Это удобно понимать как лестницу:
+\begin{enumerate}[label=\arabic*.]
+  \item \texttt{SPIN} даёт общую механику online preference/DPO.
+  \item \texttt{RefPlay} даёт обвязку для training from comparisons.
+  \item \texttt{NLHF} реализует baseline в духе paper setup.
+  \item \texttt{CrossPlay} --- это собственное расширение в сторону multi-model game.
+\end{enumerate}
+
+\section{Что реализовано в paper-faithful NLHF baseline}
+
+\texttt{NLHF} в текущем коде реализован как dual-policy recipe поверх \texttt{refplay}-стека. Схема следующая:
+\begin{enumerate}[label=\arabic*.]
+  \item \texttt{policy\_a} генерирует ответ на prompt;
+  \item \texttt{policy\_b} генерирует ответ на тот же prompt;
+  \item pairwise judge вычисляет preference probability;
+  \item frozen reference policy даёт reference log-probabilities;
+  \item trainable policy обновляется с учётом предпочтения и KL-штрафа.
+\end{enumerate}
+
+Пусть $p \in [0,1]$ --- вероятность того, что judge предпочитает ответ текущей policy. Тогда в коде используется величина
+\[
+A_{\mathrm{pref}} = p - 0.5,
+\]
+которая играет роль ``preference advantage''. Далее оценивается KL-like отклонение от reference:
+\[
+\widehat{\mathrm{KL}} = \log \pi_\theta(y \mid x) - \log \pi_{\mathrm{ref}}(y \mid x),
+\]
+после чего строится вес:
+\[
+w = A_{\mathrm{pref}} - \tau \widehat{\mathrm{KL}},
+\]
+и оптимизируется loss
+\[
+\mathcal L_{\mathrm{NLHF}}
+=
+-
+\mathbb E\bigl[\mathrm{stopgrad}(w)\cdot \log \pi_\theta(y \mid x)\bigr].
+\]
+
+Интуитивно:
+\begin{itemize}
+  \item если judge предпочитает ответ модели, то $p > 0.5$, и policy получает положительный learning signal;
+  \item если ответ хуже альтернативного, то $p < 0.5$, и learning signal становится отрицательным;
+  \item коэффициент $\tau$ регулирует силу удержания относительно reference.
+\end{itemize}
+
+Такой baseline уже ценен как paper-faithful точка отсчёта. Однако он всё ещё ближе к схеме ``одна главная policy против alternative/opponent, синхронизируемого через EMA'', чем к полностью симметричной игре двух независимых агентов.
+
+\section{Что реализовано в CrossPlay}
+
+\texttt{CrossPlay} --- это основной практический вклад текущего этапа работы. Его ключевая идея: \textbf{обе модели живые, обе генерируют ответы на одинаковые prompt'ы, и каждая обучается только на собственных поражениях}.
+
+\subsection{Высокоуровневый пайплайн}
+
+Для каждого prompt $x$:
+\[
+y_A \sim \pi_A(\cdot \mid x),
+\qquad
+y_B \sim \pi_B(\cdot \mid x).
+\]
+
+Judge независимо оценивает оба ответа:
+\[
+s_A = J(x, y_A),
+\qquad
+s_B = J(x, y_B).
+\]
+
+Дальше:
+\begin{itemize}
+  \item если $s_B > s_A$, то \texttt{policy\_a} проиграла;
+  \item для \texttt{policy\_a} создаётся пара
+  \[
+  y^+ = y_B,\qquad y^- = y_A;
+  \]
+  \item если $s_A > s_B$, то симметрично проиграла \texttt{policy\_b}.
+\end{itemize}
+
+То есть каждая policy получает update не на каком-то абстрактном ``хорошем'' ответе, а на том конкретном ответе соперника, которым она была побита на данной задаче.
+
+\subsection{Почему это не просто ещё один DPO}
+
+Здесь есть три принципиально важных расширения.
+
+\paragraph{1. Гетерогенность моделей.}
+\texttt{policy\_a} и \texttt{policy\_b} могут быть из разных model families и иметь разные токенизаторы. Это значит, что обучение строится не на shared token space, а на текстовом сравнении:
+\begin{enumerate}[label=\arabic*.]
+  \item обе модели генерируют текст;
+  \item judge судит текст;
+  \item chosen/rejected пары потом отдельно ретокенизируются токенизатором целевой policy.
+\end{enumerate}
+
+\paragraph{2. Раздельные anchors.}
+У каждой модели свой frozen anchor:
+\begin{itemize}
+  \item \texttt{anchor\_a} для \texttt{policy\_a};
+  \item \texttt{anchor\_b} для \texttt{policy\_b}.
+\end{itemize}
+Это особенно важно для cross-vendor матчапов.
+
+\paragraph{3. Benchmark-aware replay.}
+Ошибки не просто складываются в один общий буфер. Они группируются по benchmark buckets, и sampling при update усиливает именно те подмножества задач, где политика систематически проигрывает.
+
+\section{Математика CrossPlay-обновления}
+
+Пусть \texttt{policy\_a} проиграла на prompt $x$. Тогда для неё строится DPO-пара:
+\[
+y^+ = y_B,\qquad y^- = y_A.
+\]
+
+Соответствующий reference-DPO loss можно записать как
+\[
+\mathcal L_{\mathrm{DPO}}^A
+=
+-
+\log \sigma \Bigl(
+\beta
+\bigl[
+(\log \pi_A(y^+ \mid x)-\log \pi_A(y^- \mid x))
+-
+(\log \rho_A(y^+ \mid x)-\log \rho_A(y^- \mid x))
+\bigr]
+\Bigr),
+\]
+где:
+\begin{itemize}
+  \item $\pi_A$ --- текущая \texttt{policy\_a};
+  \item $\rho_A$ --- её frozen anchor;
+  \item $\beta$ --- DPO temperature.
+\end{itemize}
+
+Аналогично строится loss для \texttt{policy\_b}, если она проиграла \texttt{policy\_a}.
+
+Таким образом, \texttt{CrossPlay} по духу сочетает:
+\begin{itemize}
+  \item game-based data generation;
+  \item pairwise preference construction;
+  \item reference-regularized policy updates.
+\end{itemize}
+
+\section{Benchmark-aware replay более формально}
+
+Для каждой policy хранится replay-buffer её собственных неудач. Для benchmark bucket $b$ вычисляется priority, которая интуитивно растёт, если:
+\begin{itemize}
+  \item политика чаще проигрывает на этом benchmark'е;
+  \item и если отставание по среднему reward там больше.
+\end{itemize}
+
+Схематично это выглядит как
+\[
+\mathrm{priority}(b)
+=
+1
++
+\max(\mathrm{opp\_wins}_b-\mathrm{own\_wins}_b,0)
++
+\max(\mathrm{reward\_gap}_b,0).
+\]
+
+Внутри benchmark bucket отдельные примеры тоже могут перевзвешиваться по margin:
+\[
+w_{\mathrm{example}} \propto (1+\mathrm{margin})^\alpha.
+\]
+
+Это очень важный момент. `CrossPlay` не просто обучает каждую модель на ``любых поражениях'', а создаёт механизм \textbf{фокусированного подтягивания слабых областей}.
+
+\section{Какой сетап уже реально реализован и проверен}
+
+На текущий момент реально реализован, запущен и доведён до конца heterogeneous \texttt{CrossPlay} setup:
+\begin{itemize}
+  \item \texttt{policy\_a}: \texttt{Qwen/Qwen2.5-0.5B-Instruct};
+  \item \texttt{policy\_b}: \texttt{HuggingFaceTB/SmolLM2-1.7B-Instruct}.
+\end{itemize}
+
+Датасет:
+\begin{itemize}
+  \item train: \texttt{gsm8k/train\_plain.parquet};
+  \item val: \texttt{gsm8k/test\_plain.parquet}.
+\end{itemize}
+
+Размеры:
+\begin{itemize}
+  \item train: $7473$ примера;
+  \item val: $1319$ примеров.
+\end{itemize}
+
+Основные training hyperparameters:
+\begin{itemize}
+  \item \texttt{train\_batch\_size} $= 1$;
+  \item \texttt{ppo\_mini\_batch\_size} $= 1$;
+  \item \texttt{ppo\_micro\_batch\_size\_per\_gpu} $= 1$;
+  \item \texttt{val\_batch\_size} $= 32$;
+  \item \texttt{total\_training\_steps} $= 3737$.
+\end{itemize}
+
+С инженерной точки зрения важно, что полный сценарий был:
+\begin{enumerate}[label=\arabic*.]
+  \item запущен;
+  \item упал по памяти на промежуточном шаге;
+  \item безопасно resumed;
+  \item доведён до финального checkpoint'а.
+\end{enumerate}
+
+Это существенный результат: в distributed RLHF-пайплайнах нередко именно reproducible end-to-end execution является главным риском.
+
+\section{Текущий judge и его ограничения}
+
+Текущий judge для \texttt{GSM8K} очень грубый. Он выдаёт только три значения:
+\[
+1.0 \quad \text{за exact match},
+\]
+\[
+0.1 \quad \text{за ответ, из которого извлеклось число, но оно неверно},
+\]
+\[
+0.0 \quad \text{если final answer не извлёкся}.
+\]
+
+Причём извлечение завязано на формат
+\[
+\texttt{\#\#\#\# ...}
+\]
+и последующее вытаскивание числа из области final answer.
+
+Это означает, что множество качественно разных ошибок схлопывается в одну и ту же reward-категорию. С точки зрения signal quality это главный текущий bottleneck.
+
+\section{Экспериментальные результаты}
+
+На eval по $500$ validation examples были получены следующие outcome rates:
+
+\begin{center}
+\begin{tabular}{lccccc}
+\toprule
+Run & $A$ win & $B$ win & Tie & $\mathbb E[r_A]$ & $\mathbb E[r_B]$ \\
+\midrule
+\texttt{init\_vs\_init} & 0.008 & 0.084 & 0.908 & 0.0026 & 0.0084 \\
+\texttt{initA\_vs\_ckptB} & 0.008 & 0.492 & 0.500 & 0.0026 & 0.0548 \\
+\texttt{ckpt\_vs\_ckpt} & 0.506 & 0.006 & 0.488 & 0.1000 & 0.0548 \\
+\texttt{ckptA\_vs\_initB} & 0.916 & 0.000 & 0.084 & 0.1000 & 0.0084 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Как это интерпретировать}
+
+Из этих чисел следует:
+\begin{enumerate}[label=\arabic*.]
+  \item На старте \texttt{SmolLM 1.7B} сильнее \texttt{Qwen 0.5B}.
+  \item После обучения выросли обе стороны.
+  \item Наиболее сильный рост по текущему judge произошёл у \texttt{policy\_a}.
+\end{enumerate}
+
+Однако крайне важно не переинтерпретировать эти результаты. Если посмотреть на reward means, то значение порядка $0.1$ соответствует не ``модель хорошо решает задачи'', а скорее режиму ``модель стабильно выдаёт parseable final answer, но далеко не всегда правильный''. Поэтому текущий эксперимент показывает:
+\begin{itemize}
+  \item \textbf{не} окончательную победу в math reasoning;
+  \item а то, что competitive training loop уже даёт measurable effect under current judge.
+\end{itemize}
+
+\section{Главный научный вывод промежуточного этапа}
+
+Главный вывод текущего этапа можно сформулировать так:
+
+\begin{quote}
+\textbf{Основная инженерная гипотеза подтверждена: heterogeneous competitive preference training в VERL можно реализовать, стабилизировать и довести до end-to-end эксперимента. Главный bottleneck следующего этапа находится уже не в training loop, а в качестве reward/preference signal.}
+\end{quote}
+
+Это очень хороший промежуточный результат. Он означает, что проект уже перешёл из фазы ``сможем ли мы вообще запустить такую постановку'' в фазу ``какой judge / reward / preference design действительно ведёт к содержательному улучшению''.
+
+\section{Что можно и чего нельзя пока утверждать}
+
+\subsection{Что уже можно утверждать честно}
+
+\begin{itemize}
+  \item Построена рабочая исследовательская платформа для multi-agent preference learning в \texttt{VERL}.
+  \item Реализован paper-like \texttt{NLHF} baseline.
+  \item Реализован новый \texttt{CrossPlay} recipe для двух разных живых моделей.
+  \item Проведён полный end-to-end experiment с checkpoint recovery и offline eval.
+  \item Получен первый measurable signal в пользу competitive training under current judge.
+  \item Локализован следующий научный bottleneck: coarse reward / judge.
+\end{itemize}
+
+\subsection{Чего пока утверждать нельзя}
+
+\begin{itemize}
+  \item Что уже получено строгое Nash equilibrium learning.
+  \item Что модель уже доказуемо стала лучше математически в широком смысле.
+  \item Что \texttt{CrossPlay} уже превосходит RLHF или исходный \texttt{NLHF} на честных внешних метриках.
+\end{itemize}
+
+\section{Что дальше делать}
+
+Наиболее логичный roadmap выглядит так.
+
+\subsection{Шаг 1. Улучшить сигнал}
+
+Сейчас самая важная задача --- заменить judge $1/0.1/0$ на более выразительный signal. Возможные направления:
+\begin{itemize}
+  \item richer outcome reward;
+  \item pairwise preference model;
+  \item verifier-style reward;
+  \item process-aware scoring.
+\end{itemize}
+
+\subsection{Шаг 2. Сравнить mathematical objectives}
+
+Сейчас в репозитории уже есть как минимум два содержательно разных подхода:
+\begin{itemize}
+  \item \texttt{NLHF}: preference-probability update;
+  \item \texttt{CrossPlay}: competitive data generation + reference DPO.
+\end{itemize}
+
+Следующий шаг --- поставить их рядом как baseline'ы и сравнить:
+\begin{itemize}
+  \item устойчивость обучения;
+  \item скорость адаптации;
+  \item качество итоговых матчапов;
+  \item чувствительность к типу judge.
+\end{itemize}
+
+\subsection{Шаг 3. Расширить данные}
+
+\texttt{GSM8K} удобен как debugging dataset, но дальше для содержательного reasoning желательно переходить к более сложным задачам. Важно, однако, делать это \textbf{после} улучшения judge, иначе будет трудно отделить проблемы датасета от проблем reward signal.
+
+\subsection{Шаг 4. Реализовать и запустить второй сетап}
+
+Сетап ``одна база, разные специализации'' очень важен, потому что:
+\begin{itemize}
+  \item он даёт более чистую интерпретацию результатов;
+  \item он ближе к задаче skill transfer;
+  \item он может показать, возможно ли через game dynamics получить multi-skill policy лучше, чем через обычный RLHF на смеси задач.
+\end{itemize}
+
+\subsection{Шаг 5. Вернуться к более строгой Nash-интерпретации}
+
+После стабилизации signal design имеет смысл переходить к более строгим вопросам:
+\begin{itemize}
+  \item exploitability;
+  \item циклы предпочтений;
+  \item population-based opponents;
+  \item устойчивость к смене judge.
+\end{itemize}
+
+\section{Итог}
+
+Если формулировать общий результат максимально точно, то он звучит так:
+
+\begin{quote}
+За текущий этап была не просто написана новая training script-логика, а построена исследовательская платформа в \texttt{VERL} для multi-agent preference learning. В ней уже поддерживаются paper-faithful \texttt{NLHF} baseline и новый heterogeneous \texttt{CrossPlay} setting, который доведён до полноценного end-to-end эксперимента, resume после OOM и offline evaluation. Первый эксперимент показал, что competitive preference-based обучение действительно даёт measurable signal, а главный limiting factor следующего этапа --- это уже не distributed pipeline, а качество reward/preference signal.
+\end{quote}
+
+Самая полезная короткая внутренняя формулировка для понимания собственного прогресса такая:
+
+\begin{quote}
+Я уже реализовала и проверила платформу для multi-agent preference learning в VERL; сейчас работа перешла из инженерной фазы ``запустить игру между моделями'' в исследовательскую фазу ``какой preference/reward signal действительно ведёт к содержательному улучшению''.
+\end{quote}
+
+\begin{thebibliography}{9}
+
+\bibitem{nlhf}
+Liu et al.
+\newblock \textit{Nash Learning from Human Feedback}.
+\newblock \url{https://arxiv.org/abs/2312.00886}
+
+\end{thebibliography}
+
+\end{document}
