@@ -6,8 +6,8 @@ import hydra
 import ray
 from omegaconf import OmegaConf
 
-from recipe.refplay.main_refplay import get_custom_reward_fn
 from recipe.crossplay.crossplay_ray_trainer import RayCrossPlayTrainer
+from recipe.crossplay.reward_loading import get_custom_reward_fn
 
 
 def build_parser() -> argparse.ArgumentParser:

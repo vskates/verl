@@ -3,7 +3,7 @@ import os
 import hydra
 import ray
 
-from recipe.refplay.main_refplay import get_custom_reward_fn
+from .reward_loading import get_custom_reward_fn
 from .crossplay_ray_trainer import RayCrossPlayTrainer
 
 
